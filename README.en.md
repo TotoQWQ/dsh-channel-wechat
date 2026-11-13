@@ -1,6 +1,6 @@
 # WeChat ClawBot (iLink) Channel · DeepSeek Harness Plugin
 
-[中文](./README.md) | **English** · version **2.1.0** · [Changelog](./CHANGELOG.md)
+[中文](./README.md) | **English** · version **2.1.1** · [Changelog](./CHANGELOG.md)
 
 Connects a **DeepSeek Harness session** with **WeChat** (via Tencent's official ClawBot / "lobster" plugin) in **both directions**:
 a message in WeChat becomes a user message in a DSH session, and the assistant's reply goes back to WeChat.
@@ -39,6 +39,13 @@ node install.mjs --dry-run
 
 You can also hand `install.mjs` to any DSH session's agent and ask it to install the plugin — the file is self-describing.
 
+### Self-test
+
+After installing, run the 22-check smoke test (sends no WeChat messages):
+
+```bash
+DSH_WEB_URL=http://127.0.0.1:60260 node test-api.mjs
+```n
 ### Option 2 — DSH plugin manager
 
 ```text

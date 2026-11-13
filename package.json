@@ -1,6 +1,6 @@
 {
   "name": "dsh-channel-wechat",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "private": true,
   "type": "module",
   "description": "WeChat ClawBot (iLink) channel: bidirectional mirroring between WeChat and DeepSeek Harness sessions",
@@ -19,6 +19,7 @@
     "locale/*.json",
     "icon.svg",
     "install.mjs",
+    "test-api.mjs",
     "README.md",
     "README.en.md",
     "CHANGELOG.md",

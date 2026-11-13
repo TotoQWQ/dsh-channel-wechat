@@ -32,8 +32,8 @@ const ILINK_APP_ID = 'bot'
 /** 0x000MMNNPP：与官方 2.4.10 对齐 */
 const ILINK_APP_CLIENT_VERSION = (2 << 16) | (4 << 8) | 10
 /** 插件版本：与 package.json 保持一致，出现在 base_info.channel_version 里 */
-const CHANNEL_VERSION = '2.1.0'
-const BOT_AGENT = 'DSH-WeChat/2.1.0'
+const CHANNEL_VERSION = '2.1.1'
+const BOT_AGENT = 'DSH-WeChat/2.1.1'
 /** 媒体 CDN（官方 getUploadUrl 没返回 upload_full_url 时用它拼上传地址） */
 const CDN_BASE = 'https://novac2c.cdn.weixin.qq.com/c2c'
 
@@ -1078,13 +1078,13 @@ function createChannel(ctx, config) {
         const retry = await postOnce(chunk, '')
         if (retry.ret !== 0) {
           throw new Error(
-            `sendmessage 失败 ret=${attempt.ret} ${String(attempt.resp?.errmsg ?? '')}` +
-              `；去掉 context_token 重试仍失败 ret=${retry.ret} ${String(retry.resp?.errmsg ?? '')}`,
+            `${describeSendError(attempt.ret, attempt.resp?.errmsg)}` +
+              `；去掉 context_token 重试仍失败：${describeSendError(retry.ret, retry.resp?.errmsg)}`,
           )
         }
         attempt = retry
       } else if (attempt.ret !== 0) {
-        throw new Error(`sendmessage ret=${attempt.ret} ${String(attempt.resp?.errmsg ?? '')}`)
+        throw new Error(describeSendError(attempt.ret, attempt.resp?.errmsg))
       }
       results.push({
         messageId: attempt.resp?.message_id ?? null,
@@ -1115,12 +1115,26 @@ function createChannel(ctx, config) {
     return 'file'
   }
 
+  /** 把 iLink 的业务错误码翻译成能指导操作的中文说明。 */
+  function describeSendError(ret, errmsg) {
+    const code = Number(ret)
+    const hint =
+      code === -2
+        ? '（发送上下文失效，通常是 context_token 过期：让对方先给机器人发一条消息即可恢复）'
+        : code === -3
+          ? '（参数无效：目标微信 id 不对，或该用户还没和机器人建立会话）'
+          : code === -14
+            ? '（token 已失效，需要重新扫码登录）'
+            : ''
+    return `sendmessage ret=${code} ${String(errmsg ?? '')}${hint}`.trim()
+  }
+
   async function postMessage(account, msg) {
     const resp = JSON.parse(
       await apiPost(apiBaseOf(account), 'ilink/bot/sendmessage', { msg }, account.botToken),
     )
     const ret = Number(resp?.ret ?? 0)
-    if (ret !== 0) throw new Error(`sendmessage ret=${ret} ${String(resp?.errmsg ?? '')}`)
+    if (ret !== 0) throw new Error(describeSendError(ret, resp?.errmsg))
     return resp
   }
 
@@ -1901,10 +1915,16 @@ function createChannel(ctx, config) {
       const binding = Object.values(state.bindings).find(
         (b) => b.accountId === accountId && (b.toUserId === toUserId || b.chatId === `user:${toUserId}`),
       )
+      if (!binding) {
+        throw new Error(
+          `没有与 ${toUserId} 的会话记录：微信不接受对陌生人的主动消息，` +
+            `先让对方给机器人发一条消息（iLink 会带回 context_token），再发就行`,
+        )
+      }
       return sendToChat({
         accountId,
         toUserId,
-        contextToken: binding?.contextToken ?? '',
+        contextToken: binding.contextToken ?? '',
         text,
       })
     },
