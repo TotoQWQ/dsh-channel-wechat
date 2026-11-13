@@ -1,6 +1,6 @@
 # 微信 ClawBot（iLink）通道 · DeepSeek Harness 插件
 
-**中文** | [English](./README.en.md)
+**中文** | [English](./README.en.md) · 版本 **2.1.0** · [更新日志](./CHANGELOG.md)
 
 把 **DeepSeek Harness 的会话**和**微信（官方 ClawBot「龙虾」插件）**双向接起来：
 微信里发消息 → 变成 DSH 会话里的用户消息；DSH 会话里的回复 → 发回微信。

@@ -1,5 +1,7 @@
 # WeChat ClawBot (iLink) Channel · DeepSeek Harness Plugin
 
+[中文](./README.md) | **English** · version **2.1.0** · [Changelog](./CHANGELOG.md)
+
 Connects a **DeepSeek Harness session** with **WeChat** (via Tencent's official ClawBot / "lobster" plugin) in **both directions**:
 a message in WeChat becomes a user message in a DSH session, and the assistant's reply goes back to WeChat.
 Multi-account, per-chat binding to any DSH session, and a dedicated panel in the Web GUI.
