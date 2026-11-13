@@ -24,5 +24,8 @@
         mirrorAssistantMessages: true
         # 镜像扫描间隔（毫秒）
         mirrorIntervalMs: 1200
+        # 跨账号转发：同一会话下，A 号收到的消息也发到 B/C 号的微信
+        relayAcrossAccounts: true
+        relayPrefix: '[{account}] '
         # iLink 服务地址，一般不用改
         apiBase: 'https://ilinkai.weixin.qq.com'

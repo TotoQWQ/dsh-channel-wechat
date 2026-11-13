@@ -167,6 +167,9 @@ function normalizeConfig(raw) {
     mirrorUserMessages: c.mirrorUserMessages !== false,
     mirrorAssistantMessages: c.mirrorAssistantMessages !== false,
     mirrorIntervalMs: Number.isFinite(c.mirrorIntervalMs) && c.mirrorIntervalMs >= 300 ? c.mirrorIntervalMs : 1200,
+    // 跨账号转发：同一会话下，A 号收到的消息也发到 B/C 号的聊天里
+    relayAcrossAccounts: c.relayAcrossAccounts !== false,
+    relayPrefix: typeof c.relayPrefix === 'string' ? c.relayPrefix : '[{account}] ',
     stateDir,
   }
 }
@@ -1287,6 +1290,53 @@ function createChannel(ctx, config) {
   /** 队列里的旧消息不再补发：超过 PENDING_TTL_MS 的直接丢弃，避免刷屏。 */
   const PENDING_TTL_MS = 10 * 60_000
 
+  // -- 跨账号转发：A 号收到的消息也送到 B 号的聊天 --------------------------
+
+  function siblingBindings(binding) {
+    return Object.values(state.bindings).filter(
+      (b) =>
+        b.key !== binding.key &&
+        b.sessionId === binding.sessionId &&
+        b.accountId !== binding.accountId &&
+        String(b.toUserId ?? b.chatId ?? '').includes('@im.'),
+    )
+  }
+
+  /** 转发用摘要：只要能读懂的文本，不带本地路径。 */
+  function relaySummary(msg) {
+    const items = Array.isArray(msg?.item_list) ? msg.item_list : []
+    return items
+      .map((item) => itemText(item))
+      .filter(Boolean)
+      .join('\n')
+      .trim()
+  }
+
+  async function relayInbound(binding, msg) {
+    if (!config.relayAcrossAccounts) return []
+    const siblings = siblingBindings(binding)
+    if (siblings.length === 0) return []
+    const body = relaySummary(msg) || '[非文本消息]'
+    const name = state.accounts[binding.accountId]?.name ?? binding.accountId
+    const prefix = String(config.relayPrefix).replace('{account}', name)
+    const text = `${prefix}${body}`.slice(0, Math.max(200, config.maxReplyChars))
+    const sent = []
+    for (const sibling of siblings) {
+      try {
+        await sendToBinding(sibling, text)
+        sent.push(sibling.key)
+      } catch (err) {
+        log('warn', 'relay failed', {
+          from: binding.key,
+          to: sibling.key,
+          error: String(err?.message ?? err),
+        })
+      }
+    }
+    if (sent.length) log('info', 'relayed inbound', { from: binding.key, to: sent })
+    return sent
+  }
+
   async function flushPending(binding) {
     let queue = normalizePending(binding.pending).filter((item) => item.text)
     if (queue.length === 0) {
@@ -1438,6 +1488,12 @@ function createChannel(ctx, config) {
     return enqueue(binding.key, async () => {
       log('info', 'inbound', { accountId, chatId, chars: text.length })
       const started = Date.now()
+      // 同一会话下还有别的微信号：把这条消息也送到它们那边
+      try {
+        await relayInbound(binding, msg)
+      } catch (err) {
+        log('warn', 'relay error', { key: binding.key, error: String(err?.message ?? err) })
+      }
       try {
         const result = await runTurn(binding, text, signal)
         log('info', 'replied', { accountId, chatId, chars: result.reply.length, ms: Date.now() - started })
@@ -1669,6 +1725,16 @@ function createChannel(ctx, config) {
     try {
       if (method === 'GET' && (route === '' || route === 'status')) return json(res, snapshot())
       if (method === 'GET' && route === 'sessions') return json(res, { items: await listSessions() })
+      if (method === 'GET' && route === 'relay-test') {
+        const key = url.searchParams.get('key') || ''
+        const text = url.searchParams.get('text') || 'relay test'
+        const binding =
+          Object.values(state.bindings).find((b) => b.key === key) ??
+          Object.values(state.bindings).find((b) => String(b.chatId).includes('@im.'))
+        if (!binding) return json(res, { error: '没有可用绑定' }, 404)
+        const sent = await relayInbound(binding, { item_list: [{ type: 1, text_item: { text } }] })
+        return json(res, { from: binding.key, siblings: siblingBindings(binding).map((b) => b.key), sent })
+      }
       if (method === 'GET' && route === 'quote-probe') {
         const chatId = url.searchParams.get('chatId') || 'user:probe'
         let item = {}
