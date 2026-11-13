@@ -91,7 +91,7 @@ plugin_manager: install_bundle  target=<本目录的绝对路径>
 
 ## 已知限制
 
-- 只处理文本；图片/语音/文件/视频以 `[图片]`、`[语音] …` 等占位交给模型（语音若带腾讯转写会附上文字）；
+- 入站：文本直接交给模型；图片 / 文件 / 视频会从 CDN 下载并 AES-128-ECB 解密，落盘到 `~/.dsh/wechat-bridge/inbound/`，路径写进消息文本（模型可用 `read_image` 查看）。语音只取腾讯的转写文本（silk 转码未做）；
 - 群聊按 `group_id` 单独映射，回复发回发送者，未做 @ 处理；
 - 一个微信号的 ClawBot 只能绑定一个网关实例，绑定过其它实例会返回 `binded_redirect`；
 - token 失效（errcode `-14`）会停掉该账号轮询，需重扫码；

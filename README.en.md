@@ -91,7 +91,7 @@ Loopback only.
 
 ## Known limits
 
-- Text only: images / voice / files / video are passed to the model as `[图片]`, `[语音] …`, `[文件 …]` placeholders (a Tencent speech-to-text transcript is included when present).
+- Inbound: text is passed through; images / files / video are downloaded from the CDN, AES-128-ECB decrypted and saved under `~/.dsh/wechat-bridge/inbound/`, with the path included in the message text (the model can `read_image` it). Voice only contributes Tencent's speech-to-text transcript (no silk transcoding).
 - Group chats map per `group_id`; replies go to the sender and `@` mentions are not handled.
 - A WeChat account's ClawBot can be bound to a single gateway instance; binding it elsewhere returns `binded_redirect`.
 - A stale token (errcode `-14`) stops that account's poll loop and requires a new QR scan.

@@ -651,7 +651,59 @@ function createChannel(ctx, config) {
 
   // -- 消息解析 ------------------------------------------------------------
 
-  function describeInbound(msg) {
+  function decryptAesEcb(ciphertext, key) {
+    const decipher = crypto.createDecipheriv('aes-128-ecb', key, null)
+    return Buffer.concat([decipher.update(ciphertext), decipher.final()])
+  }
+
+  /** CDNMedia.aes_key 有两种编码：base64(16 原始字节) 或 base64(32 字符 hex)。 */
+  function parseAesKeyBase64(aesKeyBase64) {
+    const decoded = Buffer.from(aesKeyBase64, 'base64')
+    if (decoded.length === 16) return decoded
+    if (decoded.length === 32 && /^[0-9a-fA-F]{32}$/.test(decoded.toString('ascii'))) {
+      return Buffer.from(decoded.toString('ascii'), 'hex')
+    }
+    throw new Error(`aes_key 无法解析（${decoded.length} 字节）`)
+  }
+
+  function sniffImageExt(buf) {
+    if (buf.length > 8 && buf[0] === 0x89 && buf[1] === 0x50) return 'png'
+    if (buf.length > 3 && buf[0] === 0xff && buf[1] === 0xd8) return 'jpg'
+    if (buf.length > 6 && buf.toString('ascii', 0, 3) === 'GIF') return 'gif'
+    if (buf.length > 12 && buf.toString('ascii', 8, 12) === 'WEBP') return 'webp'
+    return 'bin'
+  }
+
+  /** 下载并解密一条入站媒体（图片/文件/视频），落盘返回路径。 */
+  async function downloadInboundMedia(item) {
+    const type = Number(item?.type ?? 0)
+    const payload =
+      type === 2 ? item.image_item : type === 4 ? item.file_item : type === 5 ? item.video_item : null
+    if (!payload) return null
+    const media = payload.media ?? {}
+    const eqp = media.encrypt_query_param
+    const fullUrl = media.full_url
+    if (!eqp && !fullUrl) return null
+    const aesKeyBase64 = payload.aeskey
+      ? Buffer.from(String(payload.aeskey), 'hex').toString('base64')
+      : media.aes_key
+    const url = fullUrl || `${CDN_BASE}/download?encrypted_query_param=${encodeURIComponent(eqp)}`
+    const res = await fetch(url)
+    if (!res.ok) throw new Error(`CDN 下载失败 ${res.status}`)
+    const encrypted = Buffer.from(await res.arrayBuffer())
+    const plain = aesKeyBase64 ? decryptAesEcb(encrypted, parseAesKeyBase64(aesKeyBase64)) : encrypted
+    const dir = path.join(config.stateDir, 'inbound')
+    fs.mkdirSync(dir, { recursive: true })
+    const ext =
+      type === 2
+        ? sniffImageExt(plain)
+        : path.extname(String(payload.file_name ?? '')).replace(/^\./, '') || 'bin'
+    const file = path.join(dir, `wx-${Date.now()}-${crypto.randomBytes(3).toString('hex')}.${ext}`)
+    fs.writeFileSync(file, plain)
+    return { file, bytes: plain.length, kind: type }
+  }
+
+  async function describeInbound(msg) {
     const items = Array.isArray(msg?.item_list) ? msg.item_list : []
     const parts = []
     for (const item of items) {
@@ -661,9 +713,32 @@ function createChannel(ctx, config) {
       } else if (type === 3) {
         const asr = item?.voice_item?.text
         parts.push(asr ? `[语音] ${String(asr)}` : '[语音消息（无转写）]')
-      } else if (type === 2) parts.push('[图片]')
-      else if (type === 4) parts.push(`[文件 ${item?.file_item?.file_name ?? ''}]`.trim())
-      else if (type === 5) parts.push('[视频]')
+      } else if (type === 2 || type === 4 || type === 5) {
+        const label = type === 2 ? '图片' : type === 4 ? `文件 ${item?.file_item?.file_name ?? ''}` : '视频'
+        try {
+          const saved = await downloadInboundMedia(item)
+          if (saved) {
+            log('info', 'inbound media saved', { type, file: saved.file, bytes: saved.bytes })
+          }
+          parts.push(
+            saved
+              ? `[${label}] 已解密保存到 ${saved.file}（${saved.bytes} 字节）。需要看图就用 read_image 打开这个路径。`
+              : `[${label}]（没有可下载的媒体引用）`,
+          )
+        } catch (err) {
+          const message = String(err?.message ?? err)
+          const payload = type === 2 ? item.image_item : type === 4 ? item.file_item : item.video_item
+          log('warn', 'inbound media failed', {
+            type,
+            error: message,
+            hasAeskey: Boolean(payload?.aeskey),
+            hasMediaKey: Boolean(payload?.media?.aes_key),
+            hasFullUrl: Boolean(payload?.media?.full_url),
+            eqpLen: String(payload?.media?.encrypt_query_param ?? '').length,
+          })
+          parts.push(`[${label}] 下载/解密失败：${message}`)
+        }
+      }
     }
     return parts.join('\n').trim()
   }
@@ -1258,7 +1333,7 @@ function createChannel(ctx, config) {
       log('warn', 'blocked by allowFrom', { accountId, fromUserId })
       return { blocked: true }
     }
-    const text = describeInbound(msg)
+    const text = await describeInbound(msg)
     if (!text) return { empty: true }
 
     const chatId = chatIdOf(msg)
