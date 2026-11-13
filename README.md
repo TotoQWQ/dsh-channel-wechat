@@ -1,6 +1,6 @@
 # 微信 ClawBot（iLink）通道 · DeepSeek Harness 插件
 
-**中文** | [English](./README.en.md) · 版本 **2.3.0** · [更新日志](./CHANGELOG.md)
+**中文** | [English](./README.en.md) · 版本 **2.4.0** · [更新日志](./CHANGELOG.md)
 
 把 **DeepSeek Harness 的会话**和**微信（官方 ClawBot「龙虾」插件）**双向接起来：
 微信里发消息 → 变成 DSH 会话里的用户消息；DSH 会话里的回复 → 发回微信。
@@ -101,7 +101,7 @@ plugin_manager: install_bundle  target=<本目录的绝对路径>
 
 ## 已知限制
 
-- 入站：文本直接交给模型；图片 / 文件 / 视频会从 CDN 下载并 AES-128-ECB 解密，落盘到 `~/.dsh/wechat-bridge/inbound/`，路径写进消息文本（模型可用 `read_image` 查看）。语音只取腾讯的转写文本（silk 转码未做）；
+- 入站：文本直接交给模型；图片 / 文件 / 视频 / **语音**都会从 CDN 下载并 AES-128-ECB 解密，落盘到 `~/.dsh/wechat-bridge/inbound/`（文件保留原文件名，语音存 `.silk`），路径、体积、时长写进消息文本（图片可用 `read_image` 查看）。语音同时带腾讯转写文本，silk→wav 转码未做；单条媒体上限 100 MB；
 - 群聊按 `group_id` 单独映射，回复发回发送者，未做 @ 处理；
 - 一个微信号的 ClawBot 只能绑定一个网关实例，绑定过其它实例会返回 `binded_redirect`；
 - token 失效（errcode `-14`）会停掉该账号轮询，需重扫码；

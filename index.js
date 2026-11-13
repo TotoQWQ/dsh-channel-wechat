@@ -32,8 +32,8 @@ const ILINK_APP_ID = 'bot'
 /** 0x000MMNNPP：与官方 2.4.10 对齐 */
 const ILINK_APP_CLIENT_VERSION = (2 << 16) | (4 << 8) | 10
 /** 插件版本：与 package.json 保持一致，出现在 base_info.channel_version 里 */
-const CHANNEL_VERSION = '2.3.0'
-const BOT_AGENT = 'DSH-WeChat/2.3.0'
+const CHANNEL_VERSION = '2.4.0'
+const BOT_AGENT = 'DSH-WeChat/2.4.0'
 /** 媒体 CDN（官方 getUploadUrl 没返回 upload_full_url 时用它拼上传地址） */
 const CDN_BASE = 'https://novac2c.cdn.weixin.qq.com/c2c'
 
@@ -886,11 +886,28 @@ function createChannel(ctx, config) {
     return 'bin'
   }
 
-  /** 下载并解密一条入站媒体（图片/文件/视频），落盘返回路径。 */
-  async function downloadInboundMedia(item) {
+  /** 下载并解密一条入站媒体（图片/语音/文件/视频），落盘返回路径。 */
+  const INBOUND_MAX_BYTES = 100 * 1024 * 1024
+
+  function safeFileStem(name, fallback) {
+    const base = String(name ?? '')
+      .replace(/[\\/:*?"<>|]/g, '_')
+      .replace(/[\u0000-\u001f]/g, '')
+      .trim()
+    return (base || fallback).slice(0, 60)
+  }
+
+  function payloadOf(item) {
     const type = Number(item?.type ?? 0)
-    const payload =
-      type === 2 ? item.image_item : type === 4 ? item.file_item : type === 5 ? item.video_item : null
+    if (type === 2) return { type, payload: item.image_item }
+    if (type === 3) return { type, payload: item.voice_item }
+    if (type === 4) return { type, payload: item.file_item }
+    if (type === 5) return { type, payload: item.video_item }
+    return { type, payload: null }
+  }
+
+  async function downloadInboundMedia(item) {
+    const { type, payload } = payloadOf(item)
     if (!payload) return null
     const media = payload.media ?? {}
     const eqp = media.encrypt_query_param
@@ -903,16 +920,37 @@ function createChannel(ctx, config) {
     const res = await fetch(url)
     if (!res.ok) throw new Error(`CDN 下载失败 ${res.status}`)
     const encrypted = Buffer.from(await res.arrayBuffer())
+    if (encrypted.length > INBOUND_MAX_BYTES) {
+      throw new Error(`媒体过大（${Math.round(encrypted.length / 1048576)} MB），上限 100 MB`)
+    }
     const plain = aesKeyBase64 ? decryptAesEcb(encrypted, parseAesKeyBase64(aesKeyBase64)) : encrypted
     const dir = path.join(config.stateDir, 'inbound')
     fs.mkdirSync(dir, { recursive: true })
-    const ext =
-      type === 2
-        ? sniffImageExt(plain)
-        : path.extname(String(payload.file_name ?? '')).replace(/^\./, '') || 'bin'
-    const file = path.join(dir, `wx-${Date.now()}-${crypto.randomBytes(3).toString('hex')}.${ext}`)
+    let ext = 'bin'
+    let stem = 'wx'
+    if (type === 2) {
+      ext = sniffImageExt(plain)
+      stem = 'img'
+    } else if (type === 3) {
+      ext = 'silk'
+      stem = 'voice'
+    } else if (type === 4) {
+      ext = path.extname(String(payload.file_name ?? '')).replace(/^\./, '').toLowerCase() || 'bin'
+      stem = safeFileStem(String(payload.file_name ?? '').replace(/\.[^.]+$/, ''), 'file')
+    } else if (type === 5) {
+      ext = 'mp4'
+      stem = 'video'
+    }
+    const file = path.join(dir, `${stem}-${Date.now()}-${crypto.randomBytes(3).toString('hex')}.${ext}`)
     fs.writeFileSync(file, plain)
-    return { file, bytes: plain.length, kind: type }
+    return {
+      file,
+      bytes: plain.length,
+      kind: type,
+      fileName: type === 4 ? String(payload.file_name ?? '') : '',
+      durationMs: Number(payload.playtime ?? payload.play_length ?? 0) || 0,
+      encodeType: type === 3 ? Number(payload.encode_type ?? 0) : 0,
+    }
   }
 
   async function describeInbound(accountId, chatId, msg) {
@@ -926,36 +964,53 @@ function createChannel(ctx, config) {
       if (type === ITEM_TEXT) {
         const body = String(item?.text_item?.text ?? '').trim()
         if (body || quoted) parts.push(`${prefix}${body}`.trim())
-      } else if (type === 3) {
-        const asr = item?.voice_item?.text
-        parts.push(`${prefix}${asr ? `[语音] ${String(asr)}` : '[语音消息（无转写）]'}`.trim())
-      } else if (type === 2 || type === 4 || type === 5) {
-        const label = type === 2 ? '图片' : type === 4 ? `文件 ${item?.file_item?.file_name ?? ''}` : '视频'
-        try {
-          const saved = await downloadInboundMedia(item)
-          if (saved) {
-            log('info', 'inbound media saved', { type, file: saved.file, bytes: saved.bytes })
-          }
-          parts.push(
-            `${prefix}${
-              saved
-                ? `[${label}] 已解密保存到 ${saved.file}（${saved.bytes} 字节）。需要看图就用 read_image 打开这个路径。`
-                : `[${label}]（没有可下载的媒体引用）`
-            }`.trim(),
-          )
-        } catch (err) {
-          const message = String(err?.message ?? err)
-          const payload = type === 2 ? item.image_item : type === 4 ? item.file_item : item.video_item
-          log('warn', 'inbound media failed', {
-            type,
-            error: message,
-            hasAeskey: Boolean(payload?.aeskey),
-            hasMediaKey: Boolean(payload?.media?.aes_key),
-            hasFullUrl: Boolean(payload?.media?.full_url),
-            eqpLen: String(payload?.media?.encrypt_query_param ?? '').length,
-          })
-          parts.push(`[${label}] 下载/解密失败：${message}`)
+        continue
+      }
+      if (![2, 3, 4, 5].includes(type)) continue
+
+      const label =
+        type === 2 ? '图片' : type === 3 ? '语音' : type === 4 ? `文件 ${item?.file_item?.file_name ?? ''}`.trim() : '视频'
+      try {
+        const saved = await downloadInboundMedia(item)
+        if (!saved) {
+          parts.push(`${prefix}[${label}]（没有可下载的媒体引用）`.trim())
+          continue
         }
+        log('info', 'inbound media saved', {
+          type,
+          file: saved.file,
+          bytes: saved.bytes,
+          name: saved.fileName || undefined,
+        })
+        const size = `${(saved.bytes / 1024).toFixed(1)} KB`
+        const seconds = saved.durationMs > 0 ? `${(saved.durationMs / 1000).toFixed(1)} 秒` : ''
+        if (type === 2) {
+          parts.push(`${prefix}[图片] 已解密保存到 ${saved.file}（${size}）。看图就用 read_image 打开这个路径。`.trim())
+        } else if (type === 3) {
+          const asr = String(item?.voice_item?.text ?? '').trim()
+          parts.push(
+            `${prefix}[语音${seconds ? ` ${seconds}` : ''}] ${asr ? `转写：${asr}` : '（无转写）'}；` +
+              `原始文件已保存到 ${saved.file}（${size}，silk 编码，需要转码才能播放）`.trim(),
+          )
+        } else if (type === 4) {
+          parts.push(
+            `${prefix}[文件 ${saved.fileName || path.basename(saved.file)}] 已保存到 ${saved.file}（${size}）。`.trim(),
+          )
+        } else {
+          parts.push(`${prefix}[视频${seconds ? ` ${seconds}` : ''}] 已保存到 ${saved.file}（${size}）。`.trim())
+        }
+      } catch (err) {
+        const message = String(err?.message ?? err)
+        const { payload } = payloadOf(item)
+        log('warn', 'inbound media failed', {
+          type,
+          error: message,
+          hasAeskey: Boolean(payload?.aeskey),
+          hasMediaKey: Boolean(payload?.media?.aes_key),
+          hasFullUrl: Boolean(payload?.media?.full_url),
+          eqpLen: String(payload?.media?.encrypt_query_param ?? '').length,
+        })
+        parts.push(`${prefix}[${label}] 下载/解密失败：${message}`.trim())
       }
     }
     return parts.join('\n').trim()

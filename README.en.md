@@ -1,6 +1,6 @@
 # WeChat ClawBot (iLink) Channel · DeepSeek Harness Plugin
 
-[中文](./README.md) | **English** · version **2.3.0** · [Changelog](./CHANGELOG.md)
+[中文](./README.md) | **English** · version **2.4.0** · [Changelog](./CHANGELOG.md)
 
 Connects a **DeepSeek Harness session** with **WeChat** (via Tencent's official ClawBot / "lobster" plugin) in **both directions**:
 a message in WeChat becomes a user message in a DSH session, and the assistant's reply goes back to WeChat.
@@ -105,7 +105,7 @@ Loopback only.
 
 ## Known limits
 
-- Inbound: text is passed through; images / files / video are downloaded from the CDN, AES-128-ECB decrypted and saved under `~/.dsh/wechat-bridge/inbound/`, with the path included in the message text (the model can `read_image` it). Voice only contributes Tencent's speech-to-text transcript (no silk transcoding).
+- Inbound: text is passed through; images / files / video / **voice** are downloaded from the CDN, AES-128-ECB decrypted and saved under `~/.dsh/wechat-bridge/inbound/` (files keep their original name, voice is saved as `.silk`), with path, size and duration included in the message text. Voice also carries Tencent's transcript; silk→wav transcoding is not implemented yet. Media limit 100 MB.
 - Group chats map per `group_id`; replies go to the sender and `@` mentions are not handled.
 - A WeChat account's ClawBot can be bound to a single gateway instance; binding it elsewhere returns `binded_redirect`.
 - A stale token (errcode `-14`) stops that account's poll loop and requires a new QR scan.
