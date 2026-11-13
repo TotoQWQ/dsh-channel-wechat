@@ -33,6 +33,8 @@ const ILINK_APP_ID = 'bot'
 const ILINK_APP_CLIENT_VERSION = (2 << 16) | (4 << 8) | 10
 const CHANNEL_VERSION = '2.0.0'
 const BOT_AGENT = 'DSH-WeChat/2.0'
+/** 媒体 CDN（官方 getUploadUrl 没返回 upload_full_url 时用它拼上传地址） */
+const CDN_BASE = 'https://novac2c.cdn.weixin.qq.com/c2c'
 
 const LONG_POLL_MS = 35_000
 const API_TIMEOUT_MS = 15_000
@@ -911,6 +913,167 @@ function createChannel(ctx, config) {
     return { ok: true, chunks: results.length, results }
   }
 
+  // -- 媒体（图片/文件/视频）：CDN 上传 + AES-128-ECB ----------------------
+
+  function aesEcbPaddedSize(size) {
+    return Math.ceil((size + 1) / 16) * 16
+  }
+
+  function encryptAesEcb(plaintext, key) {
+    const cipher = crypto.createCipheriv('aes-128-ecb', key, null)
+    return Buffer.concat([cipher.update(plaintext), cipher.final()])
+  }
+
+  function guessMediaKind(fileName) {
+    const ext = String(fileName).toLowerCase().match(/\.([a-z0-9]+)$/)?.[1] ?? ''
+    if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'].includes(ext)) return 'image'
+    if (['mp4', 'mov', 'm4v', 'webm'].includes(ext)) return 'video'
+    return 'file'
+  }
+
+  async function postMessage(account, msg) {
+    const resp = JSON.parse(
+      await apiPost(apiBaseOf(account), 'ilink/bot/sendmessage', { msg }, account.botToken),
+    )
+    const ret = Number(resp?.ret ?? 0)
+    if (ret !== 0) throw new Error(`sendmessage ret=${ret} ${String(resp?.errmsg ?? '')}`)
+    return resp
+  }
+
+  async function uploadToCdn({ account, toUserId, plaintext, mediaType }) {
+    const rawsize = plaintext.length
+    const rawfilemd5 = crypto.createHash('md5').update(plaintext).digest('hex')
+    const filesize = aesEcbPaddedSize(rawsize)
+    const filekey = crypto.randomBytes(16).toString('hex')
+    const aeskey = crypto.randomBytes(16)
+    const text = await apiPost(
+      apiBaseOf(account),
+      'ilink/bot/getuploadurl',
+      {
+        filekey,
+        media_type: mediaType,
+        to_user_id: toUserId,
+        rawsize,
+        rawfilemd5,
+        filesize,
+        no_need_thumb: true,
+        aeskey: aeskey.toString('hex'),
+      },
+      account.botToken,
+    )
+    const resp = JSON.parse(text)
+    const fullUrl = String(resp?.upload_full_url ?? '').trim()
+    const param = resp?.upload_param
+    if (!fullUrl && !param) {
+      log('warn', 'getuploadurl failed', {
+        resp: text.slice(0, 200),
+        accountId: account.id,
+        toUserId,
+        mediaType,
+        rawsize,
+        filesize,
+        md5Len: rawfilemd5.length,
+        aeskeyLen: aeskey.toString('hex').length,
+        filekey,
+      })
+      throw new Error(`getuploadurl 未返回上传地址: ${text.slice(0, 200)}`)
+    }
+    const url =
+      fullUrl ||
+      `${CDN_BASE}/upload?encrypted_query_param=${encodeURIComponent(param)}&filekey=${encodeURIComponent(filekey)}`
+    const ciphertext = encryptAesEcb(plaintext, aeskey)
+    let lastErr
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'content-type': 'application/octet-stream' },
+          body: new Uint8Array(ciphertext),
+        })
+        if (res.status === 200) {
+          const downloadParam = res.headers.get('x-encrypted-param')
+          if (!downloadParam) throw new Error('CDN 未返回 x-encrypted-param')
+          return {
+            filekey,
+            downloadEncryptedQueryParam: downloadParam,
+            aesKeyBase64: Buffer.from(aeskey.toString('hex'), 'utf8').toString('base64'),
+            fileSize: rawsize,
+            fileSizeCiphertext: filesize,
+            encryptedBytes: ciphertext.length,
+          }
+        }
+        const errText = res.headers.get('x-error-message') ?? (await res.text().catch(() => ''))
+        lastErr = new Error(`CDN 上传失败 ${res.status}: ${String(errText).slice(0, 160)}`)
+        if (res.status >= 400 && res.status < 500) throw lastErr
+      } catch (err) {
+        lastErr = err
+        if (String(err?.message ?? '').includes('上传失败 4')) throw err
+      }
+      await sleep(400 * attempt)
+    }
+    throw lastErr ?? new Error('CDN 上传失败')
+  }
+
+  async function sendMediaToChat({ accountId, toUserId, contextToken, filePath, caption }) {
+    const account = state.accounts[accountId]
+    if (!account?.botToken) throw new Error('账号未登录或已移除')
+    if (!fs.existsSync(filePath)) throw new Error(`文件不存在: ${filePath}`)
+    const stat = fs.statSync(filePath)
+    if (!stat.isFile()) throw new Error(`不是普通文件: ${filePath}`)
+    if (stat.size > 50 * 1024 * 1024) {
+      throw new Error(`文件太大（${Math.round(stat.size / 1048576)} MB），上限 50 MB`)
+    }
+    const fileName = path.basename(filePath)
+    const kind = guessMediaKind(fileName)
+    const mediaType = kind === 'image' ? 1 : kind === 'video' ? 2 : 3
+    const plaintext = fs.readFileSync(filePath)
+    const uploaded = await uploadToCdn({ account, toUserId, plaintext, mediaType })
+    const media = {
+      encrypt_query_param: uploaded.downloadEncryptedQueryParam,
+      aes_key: uploaded.aesKeyBase64,
+      encrypt_type: 1,
+    }
+    const item =
+      kind === 'image'
+        ? { type: 2, image_item: { media, mid_size: uploaded.fileSizeCiphertext } }
+        : kind === 'video'
+          ? { type: 5, video_item: { media, video_size: uploaded.fileSizeCiphertext } }
+          : { type: 4, file_item: { media, file_name: fileName, len: String(uploaded.fileSize) } }
+    const results = []
+    if (caption) {
+      results.push(
+        await postMessage(account, {
+          from_user_id: '',
+          to_user_id: toUserId,
+          client_id: uid('dsh-wechat'),
+          message_type: MESSAGE_TYPE_BOT,
+          message_state: MESSAGE_STATE_FINISH,
+          item_list: [{ type: ITEM_TEXT, text_item: { text: String(caption) } }],
+          ...(contextToken ? { context_token: contextToken } : {}),
+        }),
+      )
+    }
+    results.push(
+      await postMessage(account, {
+        from_user_id: '',
+        to_user_id: toUserId,
+        client_id: uid('dsh-wechat'),
+        message_type: MESSAGE_TYPE_BOT,
+        message_state: MESSAGE_STATE_FINISH,
+        item_list: [item],
+        ...(contextToken ? { context_token: contextToken } : {}),
+      }),
+    )
+    return {
+      ok: true,
+      kind,
+      fileName,
+      bytes: uploaded.fileSize,
+      encryptedBytes: uploaded.encryptedBytes,
+      messageIds: results.map((r) => r?.message_id ?? null),
+    }
+  }
+
   async function sendToBinding(binding, text) {
     try {
       const result = await sendToChat({
@@ -1445,6 +1608,7 @@ function createChannel(ctx, config) {
     handleHttp,
     sendToChat,
     sendProbe,
+    sendMediaToChat,
     sendToUser: async ({ accountId, toUserId, text }) => {
       const binding = Object.values(state.bindings).find(
         (b) => b.accountId === accountId && (b.toUserId === toUserId || b.chatId === `user:${toUserId}`),
@@ -1454,6 +1618,32 @@ function createChannel(ctx, config) {
         toUserId,
         contextToken: binding?.contextToken ?? '',
         text,
+      })
+    },
+    sendFileToUser: async ({ accountId, toUserId, filePath, caption }) => {
+      const all = Object.values(state.bindings)
+      const isRealChat = (b) => String(b.toUserId ?? b.chatId ?? '').includes('@im.')
+      const real = all.filter((b) => isRealChat(b) && (!accountId || b.accountId === accountId))
+      const target = toUserId
+        ? all.find(
+            (b) =>
+              (!accountId || b.accountId === accountId) &&
+              (b.toUserId === toUserId || b.chatId === `user:${toUserId}`),
+          )
+        : real.sort((a, b) => Number(b.lastInboundAt ?? b.lastOutboundAt ?? 0) - Number(a.lastInboundAt ?? a.lastOutboundAt ?? 0))[0]
+      if (!target) {
+        throw new Error('没有可用的微信会话：先让对方给机器人发一条消息（或用 to 显式指定微信用户 id）')
+      }
+      const resolvedTo = toUserId || target.toUserId || String(target.chatId).replace(/^user:/, '')
+      if (!String(resolvedTo).includes('@im.') && !String(resolvedTo).includes('@chatroom')) {
+        throw new Error(`发送目标看起来不是真实微信 id：${resolvedTo}（请传 to）`)
+      }
+      return sendMediaToChat({
+        accountId: accountId || target.accountId,
+        toUserId: resolvedTo,
+        contextToken: target.contextToken ?? '',
+        filePath,
+        caption,
       })
     },
     simulate: async (text, chatId, timeoutMs) => {
@@ -1672,6 +1862,38 @@ function registerTools(ctx, channel) {
         accountId,
         toUserId: String(args.to),
         text: String(args.text),
+      })
+    },
+  })
+
+  register({
+    name: 'wechat_send_file',
+    description:
+      'Send a local file to WeChat: the file is AES-128-ECB encrypted, uploaded to the WeChat CDN, then sent as ' +
+      'an image / video / attachment message. 把本地文件（图片、视频、任意附件）发到微信。',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Absolute local path of the file to send.' },
+        to: { type: 'string', description: 'WeChat user id; defaults to the most recent bound chat.' },
+        caption: { type: 'string', description: 'Optional text message sent before the file.' },
+        accountId: { type: 'string', description: 'Account to send from; defaults to the first.' },
+      },
+      required: ['path'],
+      additionalProperties: false,
+    },
+    timeoutMs: 240_000,
+    output: textOutput('Upload and send result: kind, byte sizes, message ids.'),
+    async execute(args) {
+      if (!args?.path) throw new Error('path 必填')
+      const snapshot = channel.snapshot()
+      const accountId = args?.accountId ? String(args.accountId) : snapshot.accounts[0]?.id
+      if (!accountId) throw new Error('还没有已登录的微信账号')
+      return channel.sendFileToUser({
+        accountId,
+        toUserId: args?.to ? String(args.to) : undefined,
+        filePath: String(args.path),
+        caption: args?.caption ? String(args.caption) : '',
       })
     },
   })
