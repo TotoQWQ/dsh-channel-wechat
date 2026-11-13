@@ -32,8 +32,8 @@ const ILINK_APP_ID = 'bot'
 /** 0x000MMNNPP：与官方 2.4.10 对齐 */
 const ILINK_APP_CLIENT_VERSION = (2 << 16) | (4 << 8) | 10
 /** 插件版本：与 package.json 保持一致，出现在 base_info.channel_version 里 */
-const CHANNEL_VERSION = '2.1.1'
-const BOT_AGENT = 'DSH-WeChat/2.1.1'
+const CHANNEL_VERSION = '2.2.0'
+const BOT_AGENT = 'DSH-WeChat/2.2.0'
 /** 媒体 CDN（官方 getUploadUrl 没返回 upload_full_url 时用它拼上传地址） */
 const CDN_BASE = 'https://novac2c.cdn.weixin.qq.com/c2c'
 
@@ -1327,6 +1327,55 @@ function createChannel(ctx, config) {
       .trim()
   }
 
+  // -- 任务进度播报 --------------------------------------------------------
+
+  const REPORT_ICON = { done: '✅', doing: '🔄', todo: '⬜', blocked: '⛔', warn: '⚠️' }
+
+  function renderReport({ title, steps, note }) {
+    const lines = [`📋 ${String(title ?? '任务进度').trim()}`]
+    const list = Array.isArray(steps) ? steps : []
+    list.forEach((step, index) => {
+      const name = typeof step === 'string' ? step : String(step?.name ?? '')
+      const status = typeof step === 'string' ? 'todo' : String(step?.status ?? 'todo')
+      lines.push(`${REPORT_ICON[status] ?? '⬜'} ${index + 1}. ${name}`)
+    })
+    if (note) lines.push(`\n${String(note).trim()}`)
+    lines.push(`\n— dsh-channel-wechat v${CHANNEL_VERSION}`)
+    return lines.join('\n')
+  }
+
+  async function sendReport({ accountId, toUserId, title, steps, note, text }) {
+    const all = Object.values(state.bindings)
+    const real = all.filter((b) => String(b.toUserId ?? b.chatId ?? '').includes('@im.'))
+    const target = toUserId
+      ? all.find(
+          (b) =>
+            (!accountId || b.accountId === accountId) &&
+            (b.toUserId === toUserId || b.chatId === `user:${toUserId}`),
+        )
+      : (accountId ? real.filter((b) => b.accountId === accountId) : real).sort(
+          (a, b) => Number(b.lastInboundAt ?? 0) - Number(a.lastInboundAt ?? 0),
+        )[0]
+    if (!target) throw new Error('没有可用的微信会话：先让对方给机器人发一条消息')
+    const body = text ? String(text) : renderReport({ title, steps, note })
+    try {
+      await sendToBinding(target, body)
+      return { ok: true, delivered: true, key: target.key, text: body }
+    } catch (err) {
+      const queued = normalizePending(target.pending).length
+      log('warn', 'report queued', { key: target.key, error: String(err?.message ?? err) })
+      return {
+        ok: false,
+        delivered: false,
+        queued,
+        key: target.key,
+        error: String(err?.message ?? err),
+        text: body,
+        hint: '消息已进发送队列，等对方下次给机器人发消息（刷新 context_token）后自动补发',
+      }
+    }
+  }
+
   async function relayInbound(binding, msg) {
     if (!config.relayAcrossAccounts) return []
     const siblings = siblingBindings(binding)
@@ -1910,6 +1959,7 @@ function createChannel(ctx, config) {
     handleHttp,
     sendToChat,
     sendProbe,
+    sendReport,
     sendMediaToChat,
     sendToUser: async ({ accountId, toUserId, text }) => {
       const binding = Object.values(state.bindings).find(
@@ -2170,6 +2220,54 @@ function registerTools(ctx, channel) {
         accountId,
         toUserId: String(args.to),
         text: String(args.text),
+      })
+    },
+  })
+
+  register({
+    name: 'wechat_report',
+    description:
+      'Publish a structured task-progress report to WeChat (title + checklist + optional note). ' +
+      'Statuses: done / doing / todo / blocked / warn. Falls back to the send queue when the token is stale. ' +
+      '把任务进度（标题 + 勾选清单 + 备注）发到微信。',
+    parameters: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: 'Report title, e.g. "v2.2.0 发布进度".' },
+        steps: {
+          type: 'array',
+          description: 'Checklist items.',
+          items: {
+            type: 'object',
+            properties: {
+              name: { type: 'string', description: 'Step description.' },
+              status: {
+                type: 'string',
+                enum: ['done', 'doing', 'todo', 'blocked', 'warn'],
+                description: 'done=✅ doing=🔄 todo=⬜ blocked=⛔ warn=⚠️',
+              },
+            },
+            required: ['name'],
+            additionalProperties: false,
+          },
+        },
+        note: { type: 'string', description: 'Optional extra line, e.g. next steps.' },
+        to: { type: 'string', description: 'WeChat user id; defaults to the most recently active chat.' },
+        accountId: { type: 'string', description: 'Account to send from; defaults to any.' },
+      },
+      required: ['title'],
+      additionalProperties: false,
+    },
+    timeoutMs: 120_000,
+    output: textOutput('Delivery result: delivered / queued, the rendered text, and any error.'),
+    async execute(args) {
+      if (!args?.title) throw new Error('title 必填')
+      return channel.sendReport({
+        title: String(args.title),
+        steps: Array.isArray(args?.steps) ? args.steps : [],
+        note: args?.note ? String(args.note) : '',
+        toUserId: args?.to ? String(args.to) : undefined,
+        accountId: args?.accountId ? String(args.accountId) : undefined,
       })
     },
   })
