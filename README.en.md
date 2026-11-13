@@ -6,6 +6,8 @@ Connects a **DeepSeek Harness session** with **WeChat** (via Tencent's official 
 a message in WeChat becomes a user message in a DSH session, and the assistant's reply goes back to WeChat.
 Multi-account, per-chat binding to any DSH session, and a dedicated panel in the Web GUI.
 
+![dsh-channel-wechat promo](./docs/promo.gif)
+
 > No OpenClaw required. WeChat ClawBot speaks Tencent's **iLink Bot** protocol (HTTP/JSON), and this plugin implements it directly.
 
 **English** | [中文](./README.md)

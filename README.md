@@ -6,6 +6,8 @@
 微信里发消息 → 变成 DSH 会话里的用户消息；DSH 会话里的回复 → 发回微信。
 支持多账号、每条微信聊天可绑定到任意一个 DSH 会话、Web GUI 里有一块专门的面板。
 
+![dsh-channel-wechat 宣传视频](./docs/promo.gif)
+
 > 不依赖 OpenClaw。微信 ClawBot 背后是腾讯的 iLink Bot 协议（HTTP/JSON），本插件直接实现它。
 
 ## 功能
