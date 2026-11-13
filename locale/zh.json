@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "微信 ClawBot 通道",
+    "description": "把微信（ClawBot / iLink）聊天接到 DeepSeek Harness 会话，并自动回复。"
+  }
+}

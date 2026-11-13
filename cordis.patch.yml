@@ -1,0 +1,28 @@
+# 微信 ClawBot（iLink）通道：把微信聊天和 DSH 会话双向接起来。
+# 安装后会注册 channel-wechat 这一行；改这里即可调整默认参数。
+- insert:
+    - id: channel-wechat
+      name: dsh-channel-wechat
+      config:
+        enabled: true
+        # 白名单：填微信用户 id（形如 xxxx@im.wechat）；为空表示谁发都放行
+        allowFrom: []
+        # 微信侧自动会话跑在哪个目录（留空则用 DSH 默认工作目录）
+        cwd: ''
+        # 可选：指定 agent preset
+        agentPreset: ''
+        # 微信消息进来后，等 agent 回复的最长时间（毫秒）
+        replyTimeoutMs: 180000
+        # 单条微信文本上限（超过会拆成多条发送）
+        maxReplyChars: 1800
+        # 注入会话时给微信消息加的前缀；留空 = 不加
+        messagePrefix: ''
+        # 网页里发的消息转发到微信时的前缀
+        webMessagePrefix: '[网页] '
+        # 双向镜像开关
+        mirrorUserMessages: true
+        mirrorAssistantMessages: true
+        # 镜像扫描间隔（毫秒）
+        mirrorIntervalMs: 1200
+        # iLink 服务地址，一般不用改
+        apiBase: 'https://ilinkai.weixin.qq.com'
