@@ -179,6 +179,7 @@ function createChannel(ctx, config) {
   const stateFile = path.join(config.stateDir, 'state.json')
   const logFile = path.join(config.stateDir, 'bridge.log')
   const qrFile = path.join(config.stateDir, 'login-qr.png')
+  const quoteFile = path.join(config.stateDir, 'quotes.json')
 
   /** @type {{version:number, accounts:Record<string,any>, bindings:Record<string,any>}} */
   let state = {
@@ -651,6 +652,90 @@ function createChannel(ctx, config) {
 
   // -- 消息解析 ------------------------------------------------------------
 
+  // -- 引用（ref_msg）解析 -------------------------------------------------
+
+  const QUOTE_MAX = 800
+  let quotes = {}
+  let quoteSaveTimer = null
+
+  function loadQuotes() {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(quoteFile, 'utf8'))
+      if (parsed && typeof parsed === 'object') quotes = parsed
+    } catch {
+      quotes = {}
+    }
+  }
+
+  function saveQuotes() {
+    if (quoteSaveTimer) return
+    quoteSaveTimer = setTimeout(() => {
+      quoteSaveTimer = null
+      try {
+        const entries = Object.entries(quotes).sort((a, b) => Number(b[1]?.at ?? 0) - Number(a[1]?.at ?? 0))
+        quotes = Object.fromEntries(entries.slice(0, QUOTE_MAX))
+        fs.mkdirSync(config.stateDir, { recursive: true })
+        fs.writeFileSync(quoteFile, JSON.stringify(quotes), { encoding: 'utf8', mode: 0o600 })
+      } catch (err) {
+        log('warn', 'saveQuotes failed', { error: String(err?.message ?? err) })
+      }
+    }, 800)
+  }
+
+  const quoteKey = (accountId, chatId, messageId) => `${accountId}|${chatId}|${messageId}`
+
+  function rememberQuote(accountId, chatId, messageId, text) {
+    const id = messageId === undefined || messageId === null ? '' : String(messageId)
+    const body = String(text ?? '').trim()
+    if (!id || !body) return
+    quotes[quoteKey(accountId, chatId, id)] = { text: body.slice(0, 4000), at: Date.now() }
+    saveQuotes()
+  }
+
+  function lookupQuote(accountId, chatId, messageId) {
+    const id = messageId === undefined || messageId === null ? '' : String(messageId)
+    if (!id) return ''
+    return quotes[quoteKey(accountId, chatId, id)]?.text ?? ''
+  }
+
+  /** 取一条 MessageItem 的纯文本（文本/图片/文件等给个可读标签）。 */
+  function itemText(item) {
+    if (!item || typeof item !== 'object') return ''
+    const type = Number(item.type ?? 0)
+    if (type === ITEM_TEXT) return String(item.text_item?.text ?? '').trim()
+    if (type === 2) return '[图片]'
+    if (type === 3) return item.voice_item?.text ? `[语音] ${item.voice_item.text}` : '[语音]'
+    if (type === 4) return `[文件 ${item.file_item?.file_name ?? ''}]`.trim()
+    if (type === 5) return '[视频]'
+    return ''
+  }
+
+  /**
+   * 解析引用：优先 ref_msg.message_item，其次按 svr_id 查本地引用库，最后退回 title 摘要。
+   * 有 partial_text（只引用一段）时按 startindex/endindex 截取。
+   */
+  function resolveQuoteRef(accountId, chatId, item) {
+    const ref = item?.ref_msg
+    if (!ref || typeof ref !== 'object') return null
+    let full = itemText(ref.message_item)
+    if (!full && ref.svr_id) full = lookupQuote(accountId, chatId, ref.svr_id)
+    if (!full && ref.title) full = String(ref.title)
+    if (!full) return null
+    const partial = ref.partial_text
+    if (partial && typeof partial === 'object') {
+      const start = Number(partial.startindex)
+      const end = Number(partial.endindex)
+      if (Number.isFinite(start) && Number.isFinite(end) && end > start && end <= full.length) {
+        full = full.slice(start, end)
+      } else if (partial.start) {
+        const at = full.indexOf(String(partial.start))
+        if (at >= 0) full = full.slice(at)
+      }
+    }
+    const text = String(full).replace(/\s+/g, ' ').trim()
+    return text ? text.slice(0, 2000) : null
+  }
+
   function decryptAesEcb(ciphertext, key) {
     const decipher = crypto.createDecipheriv('aes-128-ecb', key, null)
     return Buffer.concat([decipher.update(ciphertext), decipher.final()])
@@ -703,16 +788,20 @@ function createChannel(ctx, config) {
     return { file, bytes: plain.length, kind: type }
   }
 
-  async function describeInbound(msg) {
+  async function describeInbound(accountId, chatId, msg) {
     const items = Array.isArray(msg?.item_list) ? msg.item_list : []
     const parts = []
     for (const item of items) {
       const type = Number(item?.type ?? 0)
+      // 微信「引用/回复」：把被引用的原文（或选中的那一段）一起带给模型
+      const quoted = resolveQuoteRef(accountId, chatId, item)
+      const prefix = quoted ? `【引用】${quoted}\n` : ''
       if (type === ITEM_TEXT) {
-        if (item?.text_item?.text) parts.push(String(item.text_item.text))
+        const body = String(item?.text_item?.text ?? '').trim()
+        if (body || quoted) parts.push(`${prefix}${body}`.trim())
       } else if (type === 3) {
         const asr = item?.voice_item?.text
-        parts.push(asr ? `[语音] ${String(asr)}` : '[语音消息（无转写）]')
+        parts.push(`${prefix}${asr ? `[语音] ${String(asr)}` : '[语音消息（无转写）]'}`.trim())
       } else if (type === 2 || type === 4 || type === 5) {
         const label = type === 2 ? '图片' : type === 4 ? `文件 ${item?.file_item?.file_name ?? ''}` : '视频'
         try {
@@ -721,9 +810,11 @@ function createChannel(ctx, config) {
             log('info', 'inbound media saved', { type, file: saved.file, bytes: saved.bytes })
           }
           parts.push(
-            saved
-              ? `[${label}] 已解密保存到 ${saved.file}（${saved.bytes} 字节）。需要看图就用 read_image 打开这个路径。`
-              : `[${label}]（没有可下载的媒体引用）`,
+            `${prefix}${
+              saved
+                ? `[${label}] 已解密保存到 ${saved.file}（${saved.bytes} 字节）。需要看图就用 read_image 打开这个路径。`
+                : `[${label}]（没有可下载的媒体引用）`
+            }`.trim(),
           )
         } catch (err) {
           const message = String(err?.message ?? err)
@@ -996,6 +1087,8 @@ function createChannel(ctx, config) {
         ret: attempt.ret,
         withoutContextToken: fallback,
       })
+      // 记住这条自己发出的消息，用户以后「引用」它时能还原原文
+      rememberQuote(accountId, `user:${toUserId}`, attempt.resp?.message_id, chunk)
     }
     return { ok: true, chunks: results.length, results }
   }
@@ -1333,10 +1426,12 @@ function createChannel(ctx, config) {
       log('warn', 'blocked by allowFrom', { accountId, fromUserId })
       return { blocked: true }
     }
-    const text = await describeInbound(msg)
+    const chatId = chatIdOf(msg)
+    const text = await describeInbound(accountId, chatId, msg)
     if (!text) return { empty: true }
 
-    const chatId = chatIdOf(msg)
+    // 记下这条入站原文，供后续「引用」时按 svr_id 回查
+    rememberQuote(accountId, chatId, msg?.message_id, text)
     const binding = ensureBinding(accountId, chatId, fromUserId, String(msg?.context_token ?? ''))
     const signal = monitors.get(accountId)?.abort?.signal ?? new AbortController().signal
 
@@ -1574,6 +1669,19 @@ function createChannel(ctx, config) {
     try {
       if (method === 'GET' && (route === '' || route === 'status')) return json(res, snapshot())
       if (method === 'GET' && route === 'sessions') return json(res, { items: await listSessions() })
+      if (method === 'GET' && route === 'quote-probe') {
+        const chatId = url.searchParams.get('chatId') || 'user:probe'
+        let item = {}
+        try {
+          item = JSON.parse(url.searchParams.get('item') || '{}')
+        } catch {
+          return json(res, { error: 'item 不是合法 JSON' }, 400)
+        }
+        return json(res, {
+          resolved: resolveQuoteRef('probe', chatId, item),
+          quotes: Object.keys(quotes).length,
+        })
+      }
       if (method === 'GET' && route === 'mirror-probe') {
         const fromParam = Number(url.searchParams.get('from') ?? NaN)
         const send = url.searchParams.get('send') === '1'
@@ -1690,9 +1798,10 @@ function createChannel(ctx, config) {
 
   function start() {
     loadState()
+    loadQuotes()
     for (const account of accounts()) startMonitor(account.id)
     startMirror()
-    log('info', 'channel started', { accounts: accounts().length })
+    log('info', 'channel started', { accounts: accounts().length, quotes: Object.keys(quotes).length })
   }
 
   function stop() {
