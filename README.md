@@ -17,8 +17,24 @@
 
 要求：DSH 桌面版（profile 装插件）+ 微信里启用官方 ClawBot 插件。
 
+### 方式一：单文件安装器（推荐，一条命令）
+
+`install.mjs` 自带全部逻辑：从本仓库拉取文件到 `<DSH_HOME>/plugins/dsh-channel-wechat`，用 `dsh plugin add` 链接进 profile，登记 bundle，并在 profile 的 `cordis.patch.yml` 里追加插件行。幂等、会留 `.bak` 备份。
+
+```bash
+# 在本仓库根目录
+node install.mjs
+
+# 指定 profile / 位置，或先看计划不动手
+node install.mjs --profile web
+node install.mjs --dry-run
+```
+
+也可以让任意 DSH 会话里的 agent 直接执行：把 `install.mjs` 交给它，它会自己跑完并提示重启。
+
+### 方式二：用 DSH 的插件管理器
+
 ```text
-# 在 DSH 会话里（或让 agent 代劳）
 plugin_manager: install_bundle  target=<本目录的绝对路径>
 ```
 
