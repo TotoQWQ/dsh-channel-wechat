@@ -97,6 +97,25 @@ Loopback only.
 - WeChat QR codes expire in about 2 minutes and are auto-refreshed at most 3 times.
 - Bidirectional mirroring means everything in a bound session is sent to WeChat — mind your privacy.
 
+## Troubleshooting
+
+### WeChat receives nothing (log shows `ret=-2 prepare failed`)
+
+iLink's `sendmessage` reports business failures as **HTTP 200 with a non-zero `ret`**; `-2 prepare failed` usually means the send context (`context_token`) for that bot session expired or was invalidated (for example by a gateway restart).
+
+What this plugin does:
+
+- Any non-zero `ret` is raised as an error instead of being treated as success;
+- On failure it retries once without `context_token`, which the official plugin also does;
+- If that also fails, the text goes into a per-chat **outbox** (max 20 entries) with a 60 s backoff, and is flushed automatically on the **next inbound message from that user** (which carries a fresh token);
+- The outbox length and the chat's `lastError` are visible in `bindings[]` from `/wechat-channel/status`.
+
+So when WeChat suddenly goes quiet: have the user send one message to the bot; that refreshes the token and flushes the queue. If it still fails, the WeChat-side ClawBot binding is gone and the QR code must be scanned again.
+
+### Panel feels laggy
+
+The panel only polls `/wechat-channel/status` (every 3 s, paused while the tab is hidden, and it skips re-rendering when the payload is unchanged). `/sessions` is read on mount and on the refresh button only, so the session store is not scanned on a timer.
+
 ## License
 
 MIT — see [LICENSE](./LICENSE); third-party components in [THIRD-PARTY-NOTICES.md](./THIRD-PARTY-NOTICES.md).

@@ -867,7 +867,8 @@ function createChannel(ctx, config) {
     if (!account?.botToken) throw new Error('账号未登录或已移除')
     const chunks = splitText(text, config.maxReplyChars)
     const results = []
-    for (const chunk of chunks) {
+
+    const postOnce = async (chunk, token) => {
       const body = {
         msg: {
           from_user_id: '',
@@ -876,24 +877,148 @@ function createChannel(ctx, config) {
           message_type: MESSAGE_TYPE_BOT,
           message_state: MESSAGE_STATE_FINISH,
           item_list: [{ type: ITEM_TEXT, text_item: { text: chunk } }],
-          ...(contextToken ? { context_token: contextToken } : {}),
+          ...(token ? { context_token: token } : {}),
         },
       }
-      results.push(JSON.parse(await apiPost(apiBaseOf(account), 'ilink/bot/sendmessage', body, account.botToken)))
+      const resp = JSON.parse(await apiPost(apiBaseOf(account), 'ilink/bot/sendmessage', body, account.botToken))
+      return { resp, ret: Number(resp?.ret ?? 0) }
     }
-    return results
+
+    for (const chunk of chunks) {
+      // iLink 在 HTTP 200 里用 ret 表示业务失败（-2 prepare failed = context_token 失效等），
+      // 不检查就会静默丢消息。带 token 失败时按官方插件的做法退回「不带 context_token」再试一次。
+      let attempt = await postOnce(chunk, contextToken)
+      let fallback = false
+      if (attempt.ret !== 0 && contextToken) {
+        fallback = true
+        const retry = await postOnce(chunk, '')
+        if (retry.ret !== 0) {
+          throw new Error(
+            `sendmessage 失败 ret=${attempt.ret} ${String(attempt.resp?.errmsg ?? '')}` +
+              `；去掉 context_token 重试仍失败 ret=${retry.ret} ${String(retry.resp?.errmsg ?? '')}`,
+          )
+        }
+        attempt = retry
+      } else if (attempt.ret !== 0) {
+        throw new Error(`sendmessage ret=${attempt.ret} ${String(attempt.resp?.errmsg ?? '')}`)
+      }
+      results.push({
+        messageId: attempt.resp?.message_id ?? null,
+        ret: attempt.ret,
+        withoutContextToken: fallback,
+      })
+    }
+    return { ok: true, chunks: results.length, results }
   }
 
   async function sendToBinding(binding, text) {
-    const result = await sendToChat({
-      accountId: binding.accountId,
-      toUserId: binding.toUserId || String(binding.chatId).replace(/^user:/, ''),
-      contextToken: binding.contextToken,
-      text,
-    })
-    binding.lastOutboundAt = Date.now()
+    try {
+      const result = await sendToChat({
+        accountId: binding.accountId,
+        toUserId: binding.toUserId || String(binding.chatId).replace(/^user:/, ''),
+        contextToken: binding.contextToken,
+        text,
+      })
+      binding.lastOutboundAt = Date.now()
+      binding.lastError = ''
+      saveState()
+      return result
+    } catch (err) {
+      // iLink 拒投（常见 ret=-2 prepare failed，多为 context_token 过期）时先入队，
+      // 等下一次收到这个人的微信消息（带来新 token）后自动补发，避免静默丢消息。
+      binding.pending = [...(binding.pending ?? []), String(text)].slice(-20)
+      binding.lastError = String(err?.message ?? err)
+      binding.nextRetryAt = Date.now() + 30_000
+      saveState()
+      throw err
+    }
+  }
+
+  async function flushPending(binding) {
+    const queue = binding.pending ?? []
+    if (queue.length === 0) return 0
+    if (Date.now() < (binding.nextRetryAt ?? 0)) return 0
+    let sent = 0
+    while (binding.pending.length > 0) {
+      try {
+        await sendToChat({
+          accountId: binding.accountId,
+          toUserId: binding.toUserId || String(binding.chatId).replace(/^user:/, ''),
+          contextToken: binding.contextToken,
+          text: binding.pending[0],
+        })
+        binding.pending.shift()
+        binding.lastOutboundAt = Date.now()
+        binding.lastError = ''
+        sent += 1
+      } catch (err) {
+        binding.lastError = String(err?.message ?? err)
+        binding.nextRetryAt = Date.now() + 60_000
+        break
+      }
+    }
     saveState()
-    return result
+    return sent
+  }
+
+  // -- 发送参数矩阵探针（定位 "prepare failed"） ---------------------------
+
+  async function sendProbe({ accountId, toUserId, text, contextToken }) {
+    const account = state.accounts[accountId]
+    if (!account?.botToken) return { error: '没有可用账号' }
+    const url = `${apiBaseOf(account).replace(/\/+$/, '')}/ilink/bot/sendmessage`
+    const info = (version, agent) => ({ channel_version: version, bot_agent: agent || BOT_AGENT })
+    const variants = [
+      { name: 'baseline', info: info(CHANNEL_VERSION), clientId: uid('dsh-wechat') },
+      { name: 'channel_version=2.4.10', info: info('2.4.10'), clientId: uid('dsh-wechat') },
+      { name: 'bot_agent=OpenClaw', info: info('2.4.10', 'OpenClaw'), clientId: uid('dsh-wechat') },
+      { name: 'client_id=openclaw-weixin', info: info('2.4.10'), clientId: uid('openclaw-weixin') },
+      { name: 'with run_id', info: info('2.4.10'), clientId: uid('openclaw-weixin'), runId: uid('run') },
+      { name: 'from_user_id=botId', info: info('2.4.10'), clientId: uid('openclaw-weixin'), from: account.botId },
+      { name: 'message_state=NEW', info: info('2.4.10'), clientId: uid('openclaw-weixin'), state: 0 },
+      { name: 'no base_info', info: null, clientId: uid('dsh-wechat') },
+      { name: 'no context_token', info: info('2.4.10'), clientId: uid('dsh-wechat'), token: '' },
+    ]
+    const results = []
+    for (const variant of variants) {
+      const msg = {
+        from_user_id: variant.from ?? '',
+        to_user_id: toUserId,
+        client_id: variant.clientId,
+        message_type: MESSAGE_TYPE_BOT,
+        message_state: variant.state ?? MESSAGE_STATE_FINISH,
+        item_list: [{ type: ITEM_TEXT, text_item: { text } }],
+      }
+      const token = variant.token === undefined ? contextToken : variant.token
+      if (token) msg.context_token = token
+      if (variant.runId) msg.run_id = variant.runId
+      const body = variant.info === null ? { msg } : { msg, base_info: variant.info }
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: requestHeaders(account.botToken),
+          body: JSON.stringify(body),
+        })
+        const raw = await res.text()
+        let parsed
+        try {
+          parsed = JSON.parse(raw)
+        } catch {
+          parsed = { raw: raw.slice(0, 200) }
+        }
+        results.push({
+          variant: variant.name,
+          http: res.status,
+          ret: parsed.ret ?? null,
+          errmsg: parsed.errmsg ?? parsed.raw ?? null,
+          messageId: parsed.message_id ?? null,
+        })
+      } catch (err) {
+        results.push({ variant: variant.name, error: String(err?.message ?? err) })
+      }
+      await sleep(300)
+    }
+    return { url, toUserId, hasContextToken: Boolean(contextToken), results }
   }
 
   // -- 一轮对话 ------------------------------------------------------------
@@ -960,13 +1085,62 @@ function createChannel(ctx, config) {
 
   // -- 出站镜像：会话 → 微信 -----------------------------------------------
 
+  async function scanAndMirror(binding, from, to, options = {}) {
+    const send = options.send === true
+    const session = ctx.get('sessions')?.get?.(binding.sessionId)
+    if (!session) return { ok: false, reason: 'session not live', sessionId: binding.sessionId }
+    const start = Number(from ?? binding.lastSeq ?? 0)
+    const end = Number(to ?? session.seq ?? 0)
+    if (!Number.isFinite(end) || end <= start) return { ok: true, from: start, to: end, events: 0, candidates: [], sent: 0 }
+    let events = []
+    try {
+      events = session.snapshotEvents(start, end) ?? []
+    } catch (err) {
+      return { ok: false, reason: `snapshot failed: ${String(err?.message ?? err)}` }
+    }
+    const candidates = []
+    let sent = 0
+    for (const event of events) {
+      if (event?.type === 'assistant/message' && config.mirrorAssistantMessages) {
+        const text = stripMarkdown(textOfMessage(event.data?.message))
+        if (text) {
+          candidates.push({ seq: Number(event.seq), kind: 'assistant', len: text.length, sample: text.slice(0, 80) })
+          if (send) {
+            try {
+              await sendToBinding(binding, text)
+              sent += 1
+            } catch (err) {
+              candidates[candidates.length - 1].error = String(err?.message ?? err)
+            }
+          }
+        }
+      } else if (event?.type === 'user/message' && config.mirrorUserMessages) {
+        const source = event.data?.source ?? event.data?.message?.source
+        const rpcId = String(source?.rpcId ?? '')
+        const text = stripMarkdown(textOfMessage(event.data?.message ?? event.data))
+        if (text && source?.kind === 'user' && !rpcId.startsWith('wx-req')) {
+          candidates.push({ seq: Number(event.seq), kind: 'user', len: text.length, sample: text.slice(0, 80) })
+          if (send) {
+            try {
+              await sendToBinding(binding, `${config.webMessagePrefix}${text}`)
+              sent += 1
+            } catch (err) {
+              candidates[candidates.length - 1].error = String(err?.message ?? err)
+            }
+          }
+        }
+      }
+    }
+    return { ok: true, from: start, to: end, events: events.length, candidates, sent }
+  }
+
   async function mirrorTick() {
     if (mirrorBusy) return
     mirrorBusy = true
     try {
       for (const binding of Object.values(state.bindings)) {
-        if (binding.turnActive) continue
-        if (!binding.sessionId) continue
+        if (binding.turnActive || !binding.sessionId) continue
+        if ((binding.pending?.length ?? 0) > 0) await flushPending(binding)
         const session = ctx.get('sessions')?.get?.(binding.sessionId)
         if (!session) continue
         const from = Number(binding.lastSeq ?? 0)
@@ -978,38 +1152,21 @@ function createChannel(ctx, config) {
           saveState()
           continue
         }
-        let events = []
-        try {
-          events = session.snapshotEvents(from, seq) ?? []
-        } catch {
-          continue
-        }
-        for (const event of events) {
-          if (event?.type === 'assistant/message' && config.mirrorAssistantMessages) {
-            const text = textOfMessage(event.data?.message)
-            if (text) {
-              try {
-                await sendToBinding(binding, stripMarkdown(text))
-              } catch (err) {
-                log('warn', 'mirror assistant failed', { key: binding.key, error: String(err?.message ?? err) })
-              }
-            }
-          } else if (event?.type === 'user/message' && config.mirrorUserMessages) {
-            const source = event.data?.source ?? event.data?.message?.source
-            const rpcId = String(source?.rpcId ?? '')
-            const text = textOfMessage(event.data?.message ?? event.data)
-            const isOurs = rpcId.startsWith('wx-req')
-            if (text && source?.kind === 'user' && !isOurs) {
-              try {
-                await sendToBinding(binding, `${config.webMessagePrefix}${stripMarkdown(text)}`)
-              } catch (err) {
-                log('warn', 'mirror user failed', { key: binding.key, error: String(err?.message ?? err) })
-              }
-            }
-          }
-        }
+        const report = await scanAndMirror(binding, from, seq, { send: true })
         binding.lastSeq = seq
         saveState()
+        if ((report?.candidates?.length ?? 0) > 0) {
+          log('info', 'mirror tick', {
+            key: binding.key,
+            from,
+            to: seq,
+            ok: report?.ok,
+            reason: report?.reason,
+            events: report?.events,
+            sent: report?.sent,
+            found: report?.candidates?.length ?? 0,
+          })
+        }
       }
     } finally {
       mirrorBusy = false
@@ -1098,6 +1255,8 @@ function createChannel(ctx, config) {
         explicit: Boolean(binding.explicit),
         live: Boolean(ctx.get('sessions')?.get?.(binding.sessionId)),
         lastSeq: Number(binding.lastSeq ?? 0),
+        pending: binding.pending?.length ?? 0,
+        lastError: binding.lastError || null,
         lastInboundAt: binding.lastInboundAt ? new Date(binding.lastInboundAt).toISOString() : null,
         lastOutboundAt: binding.lastOutboundAt ? new Date(binding.lastOutboundAt).toISOString() : null,
       })),
@@ -1136,6 +1295,44 @@ function createChannel(ctx, config) {
     try {
       if (method === 'GET' && (route === '' || route === 'status')) return json(res, snapshot())
       if (method === 'GET' && route === 'sessions') return json(res, { items: await listSessions() })
+      if (method === 'GET' && route === 'mirror-probe') {
+        const fromParam = Number(url.searchParams.get('from') ?? NaN)
+        const send = url.searchParams.get('send') === '1'
+        const all = url.searchParams.get('all') === '1'
+        const targets = all
+          ? Object.values(state.bindings)
+          : [
+              Object.values(state.bindings).find((b) => b.explicit && b.chatId.includes('@im.wechat')) ??
+                Object.values(state.bindings)[0],
+            ].filter(Boolean)
+        const reports = []
+        for (const binding of targets) {
+          const report = await scanAndMirror(
+            binding,
+            Number.isFinite(fromParam) ? fromParam : binding.lastSeq,
+            undefined,
+            { send },
+          )
+          reports.push({ key: binding.key, chatId: binding.chatId, lastSeq: binding.lastSeq, ...report })
+        }
+        return json(res, { dryRun: !send, reports })
+      }
+      if (method === 'GET' && route === 'send-probe') {
+        const target =
+          Object.values(state.bindings).find((b) => b.explicit && b.chatId.includes('@im.wechat')) ??
+          Object.values(state.bindings)[0]
+        if (!target) return json(res, { error: '没有绑定' }, 404)
+        const text = url.searchParams.get('text') || '【发送参数探针】'
+        return json(
+          res,
+          await sendProbe({
+            accountId: target.accountId,
+            toUserId: target.toUserId || String(target.chatId).replace(/^user:/, ''),
+            text,
+            contextToken: target.contextToken,
+          }),
+        )
+      }
       if (method === 'GET' && route === 'client-modules') {
         const modules = ctx.get('clientModules')
         let graph = null
@@ -1219,6 +1416,18 @@ function createChannel(ctx, config) {
     unbindSession,
     handleHttp,
     sendToChat,
+    sendProbe,
+    sendToUser: async ({ accountId, toUserId, text }) => {
+      const binding = Object.values(state.bindings).find(
+        (b) => b.accountId === accountId && (b.toUserId === toUserId || b.chatId === `user:${toUserId}`),
+      )
+      return sendToChat({
+        accountId,
+        toUserId,
+        contextToken: binding?.contextToken ?? '',
+        text,
+      })
+    },
     simulate: async (text, chatId, timeoutMs) => {
       const accountId = accounts()[0]?.id ?? 'sim'
       const binding = ensureBinding(accountId, `user:${chatId || 'sim-user'}`, chatId || 'sim-user', '')
@@ -1429,15 +1638,11 @@ function registerTools(ctx, channel) {
     async execute(args) {
       if (!args?.to || !args?.text) throw new Error('to 与 text 必填')
       const snapshot = channel.snapshot()
-      const accountId = args?.accountId
-        ? String(args.accountId)
-        : snapshot.accounts[0]?.id
+      const accountId = args?.accountId ? String(args.accountId) : snapshot.accounts[0]?.id
       if (!accountId) throw new Error('还没有已登录的微信账号')
-      const binding = snapshot.bindings.find((b) => b.chatId === `user:${String(args.to)}` && b.accountId === accountId)
-      return channel.sendToChat({
+      return channel.sendToUser({
         accountId,
         toUserId: String(args.to),
-        contextToken: binding?.contextToken ?? '',
         text: String(args.text),
       })
     },

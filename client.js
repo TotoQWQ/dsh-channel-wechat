@@ -176,18 +176,30 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = React.useState('')
       const [error, setError] = React.useState('')
       const [code, setCode] = React.useState('')
+      const sigRef = React.useRef('')
+      const inflightRef = React.useRef(false)
 
-      const load = React.useCallback(async () => {
+      const load = React.useCallback(async (force) => {
+        if (inflightRef.current) return
+        if (!force && typeof document !== 'undefined' && document.visibilityState === 'hidden') return
+        inflightRef.current = true
         try {
           const next = await call('/status')
           if (next && !next.error) {
-            setState(next)
+            // 只在内容真的变了才 setState，避免每 3 秒整表重渲染
+            const sig = JSON.stringify(next)
+            if (force || sig !== sigRef.current) {
+              sigRef.current = sig
+              setState(next)
+            }
             setError('')
           } else {
             setError(next?.error || '无法读取状态')
           }
         } catch (err) {
           setError(String((err && err.message) || err))
+        } finally {
+          inflightRef.current = false
         }
       }, [])
 
@@ -201,13 +213,17 @@ window.__ModuleLoader__.load({
       }, [])
 
       React.useEffect(() => {
-        void load()
+        void load(true)
         void loadSessions()
-        const timer = setInterval(() => void load(), 2000)
-        const slow = setInterval(() => void loadSessions(), 10000)
+        // 会话列表只在打开/手动刷新时拉：它要读全部会话，定时拉会拖慢整个 GUI
+        const timer = setInterval(() => void load(false), 3000)
+        const onVisible = () => {
+          if (document.visibilityState === 'visible') void load(true)
+        }
+        document.addEventListener('visibilitychange', onVisible)
         return () => {
           clearInterval(timer)
-          clearInterval(slow)
+          document.removeEventListener('visibilitychange', onVisible)
         }
       }, [load, loadSessions])
 
@@ -223,7 +239,7 @@ window.__ModuleLoader__.load({
             })
             if (result && result.error) setError(result.error)
             else if (result && result.ok === false && result.message) setError(result.message)
-            await load()
+            await load(true)
             await loadSessions()
           } catch (err) {
             setError(String((err && err.message) || err))
@@ -277,7 +293,7 @@ window.__ModuleLoader__.load({
               },
               '新增账号',
             ),
-            h('button', { style: styles.button, onClick: () => { void load(); void loadSessions() } }, '刷新'),
+            h('button', { style: styles.button, onClick: () => { void load(true); void loadSessions() } }, '刷新'),
           ),
         ),
 

@@ -97,6 +97,25 @@ plugin_manager: install_bundle  target=<本目录的绝对路径>
 - 微信二维码约 2 分钟过期，最多自动刷新 3 次；
 - 双向镜像意味着绑定会话里的内容都会发到微信，注意隐私。
 
+## 排障
+
+### 微信收不到消息（日志里 `ret=-2 prepare failed`）
+
+iLink 的 `sendmessage` 用 **HTTP 200 + body 里的 `ret`** 表示业务失败，`-2 prepare failed` 通常是这条 bot 会话的发送上下文（`context_token`）过期或失效（例如网关重启过）。
+
+插件的处理：
+
+- 收到非 0 的 `ret` 会立刻报错，不再静默“成功”；
+- 带 `context_token` 失败时，按官方插件做法退回不带 token 重试一次；
+- 仍失败则把消息放进每聊天的**发送队列**（最多 20 条），60 秒退避重试，并在**下一次收到该用户的微信消息**（带来新 token）时自动补发；
+- 队列长度与该聊天的 `lastError` 都可以在 `/wechat-channel/status` 的 `bindings[]` 里看到。
+
+所以「微信突然收不到」时：让对方给机器人发一句话即可恢复投递；若仍不行，说明微信侧 ClawBot 绑定已失效，需要重新扫码。
+
+### 面板卡顿
+
+面板只轮询 `/wechat-channel/status`（3 秒，页面切到后台时暂停，内容未变不重渲染）；`/sessions` 只在打开面板和点「刷新」时读取，避免频繁扫描会话库。
+
 ## License
 
 MIT，见 [LICENSE](./LICENSE)；第三方组件见 [THIRD-PARTY-NOTICES.md](./THIRD-PARTY-NOTICES.md)。
