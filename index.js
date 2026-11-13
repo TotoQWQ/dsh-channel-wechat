@@ -32,8 +32,8 @@ const ILINK_APP_ID = 'bot'
 /** 0x000MMNNPP：与官方 2.4.10 对齐 */
 const ILINK_APP_CLIENT_VERSION = (2 << 16) | (4 << 8) | 10
 /** 插件版本：与 package.json 保持一致，出现在 base_info.channel_version 里 */
-const CHANNEL_VERSION = '2.4.0'
-const BOT_AGENT = 'DSH-WeChat/2.4.0'
+const CHANNEL_VERSION = '2.4.1'
+const BOT_AGENT = 'DSH-WeChat/2.4.1'
 /** 媒体 CDN（官方 getUploadUrl 没返回 upload_full_url 时用它拼上传地址） */
 const CDN_BASE = 'https://novac2c.cdn.weixin.qq.com/c2c'
 
@@ -1709,8 +1709,8 @@ function createChannel(ctx, config) {
     const text = await describeInbound(accountId, chatId, msg)
     if (!text) return { empty: true }
 
-    // 记下这条入站原文，供后续「引用」时按 svr_id 回查
-    rememberQuote(accountId, chatId, msg?.message_id, text)
+    // 记下这条入站原文供后续「引用」回查；用干净摘要（不带本地媒体路径）
+    rememberQuote(accountId, chatId, msg?.message_id, relaySummary(msg) || text)
     const binding = ensureBinding(accountId, chatId, fromUserId, String(msg?.context_token ?? ''))
     const signal = monitors.get(accountId)?.abort?.signal ?? new AbortController().signal
 
@@ -1955,6 +1955,9 @@ function createChannel(ctx, config) {
       if (method === 'GET' && (route === '' || route === 'status')) return json(res, snapshot())
       if (method === 'GET' && route === 'sessions') return json(res, { items: await listSessions() })
       if (method === 'GET' && route === 'relay-test') {
+        if (url.searchParams.get('confirm') !== '1') {
+          return json(res, { error: '该接口会真的给其它微信号发消息，加 &confirm=1 再试' }, 400)
+        }
         const key = url.searchParams.get('key') || ''
         const text = url.searchParams.get('text') || 'relay test'
         const binding =
@@ -1980,6 +1983,9 @@ function createChannel(ctx, config) {
       if (method === 'GET' && route === 'mirror-probe') {
         const fromParam = Number(url.searchParams.get('from') ?? NaN)
         const send = url.searchParams.get('send') === '1'
+        if (send && url.searchParams.get('confirm') !== '1') {
+          return json(res, { error: 'send=1 会真的补发消息，加 &confirm=1 再试' }, 400)
+        }
         const all = url.searchParams.get('all') === '1'
         const targets = all
           ? Object.values(state.bindings)
@@ -2000,6 +2006,9 @@ function createChannel(ctx, config) {
         return json(res, { dryRun: !send, reports })
       }
       if (method === 'GET' && route === 'send-probe') {
+        if (url.searchParams.get('confirm') !== '1') {
+          return json(res, { error: '该接口会真的发 9 条消息，加 &confirm=1 再试' }, 400)
+        }
         const target =
           Object.values(state.bindings).find((b) => b.explicit && b.chatId.includes('@im.wechat')) ??
           Object.values(state.bindings)[0]
@@ -2197,21 +2206,16 @@ function createChannel(ctx, config) {
       })
     },
     simulate: async (text, chatId, timeoutMs) => {
-      const accountId = accounts()[0]?.id ?? 'sim'
-      const binding = ensureBinding(accountId, `user:${chatId || 'sim-user'}`, chatId || 'sim-user', '')
-      binding.turnActive = true
+      // 自测用：不落盘绑定、不污染 state，直接用临时会话 id
+      const sessionId = `wx-${hashId(`simulate:${chatId || 'sim-user'}:${Date.now()}`)}`
       try {
-        await ensureSession(binding.sessionId)
-        const baseline = currentSeq(binding.sessionId)
-        await promptSession(binding.sessionId, text, new AbortController().signal)
-        const reply = await waitForReply(binding.sessionId, baseline, new AbortController().signal, timeoutMs)
-        binding.lastSeq = currentSeq(binding.sessionId)
-        return { ok: true, sessionId: binding.sessionId, reply }
+        await ensureSession(sessionId)
+        const baseline = currentSeq(sessionId)
+        await promptSession(sessionId, text, new AbortController().signal)
+        const reply = await waitForReply(sessionId, baseline, new AbortController().signal, timeoutMs)
+        return { ok: true, sessionId, reply }
       } catch (err) {
-        return { ok: false, sessionId: binding.sessionId, error: String(err?.message ?? err) }
-      } finally {
-        binding.turnActive = false
-        saveState()
+        return { ok: false, sessionId, error: String(err?.message ?? err) }
       }
     },
     debugSession(sessionId) {
