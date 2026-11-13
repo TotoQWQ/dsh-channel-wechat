@@ -181,7 +181,12 @@ function createChannel(ctx, config) {
   const qrFile = path.join(config.stateDir, 'login-qr.png')
 
   /** @type {{version:number, accounts:Record<string,any>, bindings:Record<string,any>}} */
-  let state = { version: STATE_VERSION, accounts: {}, bindings: {} }
+  let state = {
+    version: STATE_VERSION,
+    accounts: {},
+    bindings: {},
+    settings: { defaultSessionId: '' },
+  }
 
   const login = {
     status: 'idle', // idle | waiting | scaned | need_verifycode | confirmed | expired | error | unsupported
@@ -237,6 +242,10 @@ function createChannel(ctx, config) {
         version: STATE_VERSION,
         accounts: parsed.accounts && typeof parsed.accounts === 'object' ? parsed.accounts : {},
         bindings: parsed.bindings && typeof parsed.bindings === 'object' ? parsed.bindings : {},
+        settings:
+          parsed.settings && typeof parsed.settings === 'object'
+            ? { defaultSessionId: String(parsed.settings.defaultSessionId ?? '') }
+            : { defaultSessionId: '' },
       }
       return
     }
@@ -277,6 +286,7 @@ function createChannel(ctx, config) {
           },
         },
         bindings,
+        settings: { defaultSessionId: String(parsed.settings?.defaultSessionId ?? '') },
       }
       log('info', 'migrated v1 state to v2', { accountId: id, bindings: Object.keys(bindings).length })
       saveState(true)
@@ -670,20 +680,22 @@ function createChannel(ctx, config) {
     const key = bindingKeyOf(accountId, chatId)
     let binding = state.bindings[key]
     if (!binding) {
+      const fallback = state.settings?.defaultSessionId || `wx-${hashId(key)}`
       binding = {
         key,
         accountId,
         chatId,
         toUserId: toUserId || '',
-        sessionId: `wx-${hashId(key)}`,
-        explicit: false,
+        sessionId: fallback,
+        // 用了「默认接收会话」就算显式绑定，避免被当成自动会话
+        explicit: Boolean(state.settings?.defaultSessionId),
         contextToken: '',
         lastSeq: 0,
         lastInboundAt: null,
         lastOutboundAt: null,
       }
       state.bindings[key] = binding
-      log('info', 'binding created', { key, sessionId: binding.sessionId })
+      log('info', 'binding created', { key, sessionId: binding.sessionId, byDefault: binding.explicit })
     }
     if (toUserId) binding.toUserId = toUserId
     if (contextToken) binding.contextToken = contextToken
@@ -1452,6 +1464,7 @@ function createChannel(ctx, config) {
         lastOutboundAt: binding.lastOutboundAt ? new Date(binding.lastOutboundAt).toISOString() : null,
       })),
       mirror: { running: Boolean(mirrorTimer), intervalMs: config.mirrorIntervalMs },
+      settings: { defaultSessionId: state.settings?.defaultSessionId || '' },
       stateDir: config.stateDir,
       logFile,
     }
@@ -1565,6 +1578,30 @@ function createChannel(ctx, config) {
       if (method === 'POST' && route === 'unbind') {
         const body = await readJsonBody(req)
         return json(res, unbindSession(String(body?.key ?? '')))
+      }
+      if (method === 'POST' && route === 'default-session') {
+        const body = await readJsonBody(req)
+        const sessionId = String(body?.sessionId ?? '')
+        state.settings = { ...(state.settings ?? {}), defaultSessionId: sessionId }
+        saveState(true)
+        log('info', 'default session set', { sessionId })
+        return json(res, { ok: true, defaultSessionId: sessionId })
+      }
+      if (method === 'POST' && route === 'new-session') {
+        const body = await readJsonBody(req)
+        const controller = ctx.get('sessionController')
+        if (!controller?.create) return json(res, { ok: false, error: 'sessionController 不可用' }, 500)
+        const created = await controller.create({
+          ...(config.agentPreset ? { agentPreset: config.agentPreset } : {}),
+          ...(config.cwd ? { cwd: config.cwd } : {}),
+        })
+        const sessionId = String(created?.sessionId ?? '')
+        if (body?.bindKey && sessionId) bindSession(String(body.bindKey), sessionId)
+        if (body?.asDefault && sessionId) {
+          state.settings = { ...(state.settings ?? {}), defaultSessionId: sessionId }
+          saveState(true)
+        }
+        return json(res, { ok: true, sessionId })
       }
       return json(res, { error: `unknown route ${method} ${route}` }, 404)
     } catch (err) {

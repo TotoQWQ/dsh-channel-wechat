@@ -12,7 +12,7 @@ Multi-account, per-chat binding to any DSH session, and a dedicated panel in the
 
 - **Bidirectional mirroring** — WeChat ↔ one DSH session. Incoming WeChat messages are injected into the session (visible live in the GUI); assistant replies are sent back to WeChat; messages you type in the GUI are forwarded to WeChat with a `[网页]` prefix.
 - **Multi-account** — several WeChat bots online at once, each with its own long-poll loop, cursor and error state. Re-scan or disconnect one account without touching the others.
-- **Binding panel** — sidebar item「微信」: accounts (status / last error / re-scan / disconnect), QR login area (QR image + numeric pairing code), and a binding table (chat → session dropdown, rebind / unbind / open the session).
+- **Binding panel** — sidebar item「微信」: accounts (status / last error / re-scan / disconnect), QR login area (QR image + numeric pairing code), and a binding table (chat → session dropdown that binds immediately, unbind, open the session). A「默认接收会话」picker at the top chooses which session future WeChat chats land in, with a one-click "new session and use as default".
 - **File sending** — a local image / video / any attachment is AES-128-ECB encrypted, uploaded to the WeChat CDN, then sent as `image_item` / `video_item` / `file_item` (50 MB limit).
 - **Agent tools** — `wechat_login`, `wechat_verify_code`, `wechat_status`, `wechat_bind`, `wechat_unbind`, `wechat_send`, `wechat_send_file`, `wechat_logout`, `wechat_simulate`, `wechat_debug`.
 

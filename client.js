@@ -176,6 +176,7 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = React.useState('')
       const [error, setError] = React.useState('')
       const [code, setCode] = React.useState('')
+      const [defaultDraft, setDefaultDraft] = React.useState(undefined)
       const sigRef = React.useRef('')
       const inflightRef = React.useRef(false)
 
@@ -241,8 +242,10 @@ window.__ModuleLoader__.load({
             else if (result && result.ok === false && result.message) setError(result.message)
             await load(true)
             await loadSessions()
+            return result
           } catch (err) {
             setError(String((err && err.message) || err))
+            return null
           } finally {
             setBusy('')
           }
@@ -253,6 +256,7 @@ window.__ModuleLoader__.load({
       const login = (state && state.login) || {}
       const accounts = (state && state.accounts) || []
       const bindings = (state && state.bindings) || []
+      const defaultSession = (state && state.settings && state.settings.defaultSessionId) || ''
       const showQr = ['waiting', 'scaned', 'need_verifycode', 'expired'].includes(login.status)
 
       const openSession = (sessionId) => {
@@ -353,6 +357,65 @@ window.__ModuleLoader__.load({
           : error
             ? h('div', { style: styles.error }, error)
             : null,
+
+        h(
+          'div',
+          { style: styles.card },
+          h('h2', { style: styles.cardTitle }, '微信消息进哪个会话'),
+          h(
+            'div',
+            { style: styles.muted },
+            '默认接收会话：以后新出现的微信聊天会自动绑到它；已有的聊天在下面「会话绑定」里单独改（下拉选完立刻生效）。',
+          ),
+          h(
+            'div',
+            { style: { ...styles.actions, marginTop: 10 } },
+            h(
+              'select',
+              {
+                style: { ...styles.select, minWidth: 280 },
+                value: defaultDraft === undefined ? defaultSession : defaultDraft,
+                onFocus: () => {
+                  if (sessions.length === 0) void loadSessions()
+                },
+                onChange: (event) => setDefaultDraft(event.target.value),
+              },
+              defaultSession
+                ? null
+                : h('option', { value: '' }, '（未设置：每个新聊天各建一个自动会话）'),
+              sessions.some((item) => item.id === (defaultDraft === undefined ? defaultSession : defaultDraft))
+                ? null
+                : defaultSession
+                  ? h('option', { value: defaultSession }, defaultSession)
+                  : null,
+              sessions.map((item) => h('option', { key: item.id, value: item.id }, sessionLabel(item))),
+            ),
+            h(
+              'button',
+              {
+                style: styles.button,
+                disabled: busy === 'default' || (defaultDraft === undefined ? defaultSession : defaultDraft) === defaultSession,
+                onClick: () =>
+                  void act('default', '/default-session', {
+                    sessionId: defaultDraft === undefined ? defaultSession : defaultDraft,
+                  }),
+              },
+              '设为默认',
+            ),
+            h(
+              'button',
+              {
+                style: { ...styles.button, ...styles.primary },
+                disabled: busy === 'new-session',
+                onClick: async () => {
+                  const result = await act('new-session', '/new-session', { asDefault: true })
+                  if (result?.sessionId) setDefaultDraft(result.sessionId)
+                },
+              },
+              '新建会话并设为默认',
+            ),
+          ),
+        ),
 
         h(
           'div',
@@ -488,7 +551,15 @@ window.__ModuleLoader__.load({
                           {
                             style: styles.select,
                             value,
-                            onChange: (event) => setDraft({ ...draft, [key]: event.target.value }),
+                            onFocus: () => {
+                              if (sessions.length === 0) void loadSessions()
+                            },
+                            onChange: (event) => {
+                              const next = event.target.value
+                              setDraft({ ...draft, [key]: next })
+                              // 选完立刻生效，不用再点按钮
+                              void act(`bind-${key}`, '/bind', { key, sessionId: next })
+                            },
                           },
                           sessions.some((item) => item.id === value)
                             ? null
