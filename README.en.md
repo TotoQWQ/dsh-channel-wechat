@@ -1,6 +1,6 @@
 # WeChat ClawBot (iLink) Channel · DeepSeek Harness Plugin
 
-[中文](./README.md) | **English** · version **2.2.0** · [Changelog](./CHANGELOG.md)
+[中文](./README.md) | **English** · version **2.3.0** · [Changelog](./CHANGELOG.md)
 
 Connects a **DeepSeek Harness session** with **WeChat** (via Tencent's official ClawBot / "lobster" plugin) in **both directions**:
 a message in WeChat becomes a user message in a DSH session, and the assistant's reply goes back to WeChat.
@@ -16,6 +16,7 @@ Multi-account, per-chat binding to any DSH session, and a dedicated panel in the
 - **Multi-account** — several WeChat bots online at once, each with its own long-poll loop, cursor and error state. Re-scan or disconnect one account without touching the others.
 - **Binding panel** — sidebar item「微信」: accounts (status / last error / re-scan / disconnect), QR login area (QR image + numeric pairing code), and a binding table (chat → session dropdown that binds immediately, unbind, open the session). A「默认接收会话」picker at the top chooses which session future WeChat chats land in, with a one-click "new session and use as default".
 - **File sending** — a local image / video / any attachment is AES-128-ECB encrypted, uploaded to the WeChat CDN, then sent as `image_item` / `video_item` / `file_item` (50 MB limit).
+- **WeChat formatting** — before sending, Markdown is flattened into narrow-screen friendly text: tables become `· key: value`, headings become 【】, checkboxes become ✅/⬜, long paragraphs wrap on punctuation with indented list continuations (width via `formatMaxLine`).
 - **Progress reports** — wechat_report renders a title + checklist (✅/🔄/⬜/⛔/⚠️) + note into one WeChat message; stale tokens fall back to the send queue.
 - **Cross-account relay** — when several WeChat accounts are bound to the same session, a message received on account A is forwarded to the chats of B/C with a `[{account}] ` prefix (`relayPrefix` is configurable). Assistant replies already go to every binding, so all accounts see the same conversation.
 - **Quoted messages** — when you long-press and quote one of the bot's messages in WeChat (including quoting only a selected fragment), the quoted text enters the model context as `【引用】…`. A local quote store keeps the last 800 sent/received messages (`quotes.json`), so a bare `svr_id` can still be resolved and sliced by `startindex/endindex`.
@@ -86,6 +87,7 @@ Override the `config` of the `channel-wechat` row in your DSH profile's `cordis.
 | `cwd` | `''` | Working directory for auto-created sessions; empty = DSH default |
 | `agentPreset` | `''` | Agent preset for those sessions |
 | `replyTimeoutMs` | `180000` | Max wait for one agent turn |
+| `formatMaxLine` | `60` | Line width used when wrapping before sending |
 | `maxReplyChars` | `1800` | Max characters per WeChat message; longer replies are split |
 | `messagePrefix` | `''` | Prefix added to inbound WeChat text when injected |
 | `webMessagePrefix` | `'[网页] '` | Prefix for GUI messages forwarded to WeChat |

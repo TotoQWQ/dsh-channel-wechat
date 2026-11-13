@@ -32,8 +32,8 @@ const ILINK_APP_ID = 'bot'
 /** 0x000MMNNPP：与官方 2.4.10 对齐 */
 const ILINK_APP_CLIENT_VERSION = (2 << 16) | (4 << 8) | 10
 /** 插件版本：与 package.json 保持一致，出现在 base_info.channel_version 里 */
-const CHANNEL_VERSION = '2.2.0'
-const BOT_AGENT = 'DSH-WeChat/2.2.0'
+const CHANNEL_VERSION = '2.3.0'
+const BOT_AGENT = 'DSH-WeChat/2.3.0'
 /** 媒体 CDN（官方 getUploadUrl 没返回 upload_full_url 时用它拼上传地址） */
 const CDN_BASE = 'https://novac2c.cdn.weixin.qq.com/c2c'
 
@@ -146,6 +146,127 @@ function qrPng(text, { scale = 8, margin = 4 } = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// 微信文本排版：把 Markdown 压成适合微信窄屏阅读的纯文本
+// ---------------------------------------------------------------------------
+
+/** 两列表格 → 「· 键：值」；多列 → 「· a｜b｜c」。表头行若有分隔线会丢弃。 */
+function tableToLines(table) {
+  const raw = table
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith('|'))
+  const hasHeader = raw.some((line) =>
+    line
+      .replace(/^\|/, '')
+      .replace(/\|$/, '')
+      .split('|')
+      .every((cell) => /^:?-{2,}:?$/.test(cell.trim())),
+  )
+  const rows = raw.map((line) =>
+    line
+      .replace(/^\|/, '')
+      .replace(/\|$/, '')
+      .split('|')
+      .map((cell) => cell.trim()),
+  )
+  const body = rows.filter((cells) => !cells.every((cell) => /^:?-{2,}:?$/.test(cell)))
+  if (body.length === 0) return ''
+  const data = hasHeader ? body.slice(1) : body
+  if (data.length === 0) return ''
+  const width = Math.max(...data.map((cells) => cells.length))
+  if (width <= 2) {
+    return data.map((cells) => `· ${cells[0] ?? ''}：${cells[1] ?? ''}`.replace(/：\s*$/, '')).join('\n')
+  }
+  return data.map((cells) => `· ${cells.join('｜')}`).join('\n')
+}
+
+/** 按句读把一行切成不超过 max 的若干段。 */
+function wrapPlain(text, max) {
+  const parts = []
+  let rest = text
+  while (rest.length > max) {
+    let cut = -1
+    for (const ch of ['。', '！', '？', '；', '，', '、']) {
+      const at = rest.lastIndexOf(ch, max)
+      if (at > cut) cut = at
+    }
+    if (cut < max * 0.5) cut = rest.lastIndexOf(' ', max)
+    if (cut < max * 0.5) cut = max - 1
+    parts.push(rest.slice(0, cut + 1).trim())
+    rest = rest.slice(cut + 1).trim()
+  }
+  if (rest) parts.push(rest)
+  return parts.join('\n')
+}
+
+/** 长段落按句读断行，微信里不用横向扫视；列表项续行缩进两格。 */
+function wrapLongLines(text, max) {
+  return text
+    .split('\n')
+    .map((line) => {
+      if (line.length <= max) return line
+      if (/^[【「]/.test(line)) return line
+      const bullet = /^[ \t]*[·🔹•▪][ \t]+/.exec(line)
+      if (bullet) {
+        const prefix = bullet[0]
+        const wrapped = wrapPlain(line.slice(prefix.length), max)
+        return prefix + wrapped.split('\n').join('\n  ')
+      }
+      const numbered = /^[ \t]*\d+[.、)][ \t]+/.exec(line)
+      if (numbered) {
+        const prefix = numbered[0]
+        return prefix + wrapPlain(line.slice(prefix.length), max).split('\n').join('\n   ')
+      }
+      return wrapPlain(line, max)
+    })
+    .join('\n')
+}
+
+/**
+ * 把模型常输出的 Markdown 渲染成微信友好的纯文本：
+ * 表格转键值行、标题转【】、去掉引用/分隔线/强调符、勾选框转 emoji、长段落断行。
+ */
+export function formatWechatText(input, { maxLine = 140 } = {}) {
+  let out = String(input ?? '').replace(/\r\n?/g, '\n')
+
+  // 代码块：去掉围栏，保留内容（行宽交给微信自己折）
+  out = out.replace(/```[a-zA-Z0-9_+-]*[ \t]*\n?([\s\S]*?)```/g, (_, code) => code.replace(/\n$/, ''))
+
+  // 表格
+  out = out.replace(/(?:^|\n)((?:[ \t]*\|[^\n]*\|[ \t]*\n?)+)/g, (_, table) => `\n${tableToLines(table)}\n`)
+
+  // 分隔线
+  out = out.replace(/^[ \t]*(?:-{3,}|\*{3,}|_{3,})[ \t]*$/gm, '──────────')
+
+  // 标题
+  out = out.replace(/^[ \t]{0,3}#{1,6}[ \t]+(.+?)[ \t]*#*$/gm, '【$1】')
+
+  // 引用
+  out = out.replace(/^[ \t]{0,3}>[ \t]?/gm, '')
+
+  // 图片 / 链接
+  out = out.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_, alt, url) => alt || url)
+  out = out.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1（$2）')
+
+  // 强调
+  out = out.replace(/(\*\*|__)(.+?)\1/g, '$2')
+  out = out.replace(/~~(.+?)~~/g, '$1')
+  out = out.replace(/(^|[^*\w])\*(?!\s)([^*\n]+?)(?!\s)\*(?!\*)/g, '$1$2')
+  out = out.replace(/`([^`\n]+)`/g, '$1')
+
+  // 列表 / 勾选框
+  out = out.replace(/^[ \t]{0,3}[-*+][ \t]+/gm, '· ')
+  out = out.replace(/\[[ ]\]/g, '⬜')
+  out = out.replace(/\[[xX]\]/g, '✅')
+
+  // 长段落断行 + 空行收敛
+  out = wrapLongLines(out, maxLine)
+  out = out.replace(/[ \t]+$/gm, '')
+  out = out.replace(/\n{3,}/g, '\n\n')
+  return out.trim()
+}
+
+// ---------------------------------------------------------------------------
 // 配置
 // ---------------------------------------------------------------------------
 
@@ -171,6 +292,8 @@ function normalizeConfig(raw) {
     // 跨账号转发：同一会话下，A 号收到的消息也发到 B/C 号的聊天里
     relayAcrossAccounts: c.relayAcrossAccounts !== false,
     relayPrefix: typeof c.relayPrefix === 'string' ? c.relayPrefix : '[{account}] ',
+    // 发到微信前按这个宽度按句读断行（中文一行 ~20 字，60 字约三屏）
+    formatMaxLine: Number.isFinite(c.formatMaxLine) && c.formatMaxLine >= 20 ? c.formatMaxLine : 60,
     stateDir,
   }
 }
@@ -1033,23 +1156,10 @@ function createChannel(ctx, config) {
     return chunks.filter(Boolean)
   }
 
-  function stripMarkdown(text) {
-    let out = String(text ?? '')
-    out = out.replace(/```[a-zA-Z0-9_-]*\n([\s\S]*?)```/g, (_, code) => code.replace(/\n$/, ''))
-    out = out.replace(/`([^`]+)`/g, '$1')
-    out = out.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '$1 $2')
-    out = out.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1 ($2)')
-    out = out.replace(/^\s{0,3}#{1,6}\s+/gm, '')
-    out = out.replace(/\*\*([^*]+)\*\*/g, '$1')
-    out = out.replace(/__([^_]+)__/g, '$1')
-    out = out.replace(/^\s*[-*+]\s+/gm, '· ')
-    return out.trim()
-  }
-
   async function sendToChat({ accountId, toUserId, contextToken, text }) {
     const account = state.accounts[accountId]
     if (!account?.botToken) throw new Error('账号未登录或已移除')
-    const chunks = splitText(text, config.maxReplyChars)
+    const chunks = splitText(formatWechatText(text, { maxLine: config.formatMaxLine }), config.maxReplyChars)
     const results = []
 
     const postOnce = async (chunk, token) => {
@@ -1517,7 +1627,7 @@ function createChannel(ctx, config) {
       await promptSession(sessionId, framed, signal)
       const reply = await waitForReply(sessionId, baseline, signal, timeoutMs)
       binding.lastSeq = currentSeq(sessionId)
-      const plain = stripMarkdown(reply) || '（本轮没有产生文本回复）'
+      const plain = reply || '（本轮没有产生文本回复）'
       await sendToBinding(binding, plain)
       return { sessionId, reply: plain }
     } finally {
@@ -1594,7 +1704,7 @@ function createChannel(ctx, config) {
     let sent = 0
     for (const event of events) {
       if (event?.type === 'assistant/message' && config.mirrorAssistantMessages) {
-        const text = stripMarkdown(textOfMessage(event.data?.message))
+        const text = textOfMessage(event.data?.message)
         if (text) {
           candidates.push({ seq: Number(event.seq), kind: 'assistant', len: text.length, sample: text.slice(0, 80) })
           if (send) {
@@ -1609,7 +1719,7 @@ function createChannel(ctx, config) {
       } else if (event?.type === 'user/message' && config.mirrorUserMessages) {
         const source = event.data?.source ?? event.data?.message?.source
         const rpcId = String(source?.rpcId ?? '')
-        const text = stripMarkdown(textOfMessage(event.data?.message ?? event.data))
+        const text = textOfMessage(event.data?.message ?? event.data)
         if (text && source?.kind === 'user' && !rpcId.startsWith('wx-req')) {
           candidates.push({ seq: Number(event.seq), kind: 'user', len: text.length, sample: text.slice(0, 80) })
           if (send) {
@@ -1962,9 +2072,11 @@ function createChannel(ctx, config) {
     sendReport,
     sendMediaToChat,
     sendToUser: async ({ accountId, toUserId, text }) => {
-      const binding = Object.values(state.bindings).find(
-        (b) => b.accountId === accountId && (b.toUserId === toUserId || b.chatId === `user:${toUserId}`),
-      )
+      const matches = (b) => b.toUserId === toUserId || b.chatId === `user:${toUserId}`
+      // 先按指定账号找；找不到就退到任意账号里同一聊天的绑定（调用方常常不知道消息在哪个号上）
+      const binding =
+        Object.values(state.bindings).find((b) => b.accountId === accountId && matches(b)) ??
+        Object.values(state.bindings).find((b) => matches(b))
       if (!binding) {
         throw new Error(
           `没有与 ${toUserId} 的会话记录：微信不接受对陌生人的主动消息，` +
@@ -1972,23 +2084,48 @@ function createChannel(ctx, config) {
         )
       }
       return sendToChat({
-        accountId,
+        accountId: binding.accountId,
         toUserId,
         contextToken: binding.contextToken ?? '',
         text,
       })
     },
+    /** 主动发文本，失败自动进队列（不会因为 token 过期就丢消息）。 */
+    sendTextToUser: async ({ accountId, toUserId, text }) => {
+      const matches = (b) => b.toUserId === toUserId || b.chatId === `user:${toUserId}`
+      const binding =
+        Object.values(state.bindings).find((b) => b.accountId === accountId && matches(b)) ??
+        Object.values(state.bindings).find((b) => matches(b))
+      if (!binding) {
+        throw new Error(
+          `没有与 ${toUserId} 的会话记录：微信不接受对陌生人的主动消息，` +
+            `先让对方给机器人发一条消息（iLink 会带回 context_token），再发就行`,
+        )
+      }
+      try {
+        await sendToBinding(binding, text)
+        return { ok: true, delivered: true, accountId: binding.accountId, key: binding.key }
+      } catch (err) {
+        return {
+          ok: false,
+          delivered: false,
+          queued: normalizePending(binding.pending).length,
+          accountId: binding.accountId,
+          key: binding.key,
+          error: String(err?.message ?? err),
+          hint: '消息已进发送队列，等对方下次给机器人发消息（刷新 context_token）后自动补发',
+        }
+      }
+    },
     sendFileToUser: async ({ accountId, toUserId, filePath, caption }) => {
       const all = Object.values(state.bindings)
       const isRealChat = (b) => String(b.toUserId ?? b.chatId ?? '').includes('@im.')
-      const real = all.filter((b) => isRealChat(b) && (!accountId || b.accountId === accountId))
+      const matches = (b) => b.toUserId === toUserId || b.chatId === `user:${toUserId}`
       const target = toUserId
-        ? all.find(
-            (b) =>
-              (!accountId || b.accountId === accountId) &&
-              (b.toUserId === toUserId || b.chatId === `user:${toUserId}`),
-          )
-        : real.sort((a, b) => Number(b.lastInboundAt ?? b.lastOutboundAt ?? 0) - Number(a.lastInboundAt ?? a.lastOutboundAt ?? 0))[0]
+        ? (all.find((b) => b.accountId === accountId && matches(b)) ?? all.find((b) => matches(b)))
+        : (all.filter((b) => isRealChat(b) && (!accountId || b.accountId === accountId)).sort(
+            (a, b) => Number(b.lastInboundAt ?? b.lastOutboundAt ?? 0) - Number(a.lastInboundAt ?? a.lastOutboundAt ?? 0),
+          )[0] ?? all.filter(isRealChat)[0])
       if (!target) {
         throw new Error('没有可用的微信会话：先让对方给机器人发一条消息（或用 to 显式指定微信用户 id）')
       }
@@ -1997,7 +2134,7 @@ function createChannel(ctx, config) {
         throw new Error(`发送目标看起来不是真实微信 id：${resolvedTo}（请传 to）`)
       }
       return sendMediaToChat({
-        accountId: accountId || target.accountId,
+        accountId: target.accountId,
         toUserId: resolvedTo,
         contextToken: target.contextToken ?? '',
         filePath,
@@ -2214,9 +2351,12 @@ function registerTools(ctx, channel) {
     async execute(args) {
       if (!args?.to || !args?.text) throw new Error('to 与 text 必填')
       const snapshot = channel.snapshot()
-      const accountId = args?.accountId ? String(args.accountId) : snapshot.accounts[0]?.id
-      if (!accountId) throw new Error('还没有已登录的微信账号')
-      return channel.sendToUser({
+      if (!snapshot.accounts?.length) throw new Error('还没有已登录的微信账号')
+      // 不强制指定账号：按目标微信 id 反查绑定，失败自动进队列
+      const accountId = args?.accountId
+        ? String(args.accountId)
+        : snapshot.bindings?.find((b) => b.chatId === `user:${String(args.to)}`)?.accountId
+      return channel.sendTextToUser({
         accountId,
         toUserId: String(args.to),
         text: String(args.text),
