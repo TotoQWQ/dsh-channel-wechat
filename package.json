@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "WeChat ClawBot (iLink) channel: drive DeepSeek Harness sessions from WeChat",
+  "description": "WeChat ClawBot (iLink) channel: bidirectional mirroring between WeChat and DeepSeek Harness sessions",
   "license": "MIT",
   "exports": {
     ".": "./index.js",
@@ -18,7 +18,11 @@
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg",
-    "README.md"
+    "install.mjs",
+    "README.md",
+    "README.en.md",
+    "LICENSE",
+    "THIRD-PARTY-NOTICES.md"
   ],
   "dsh": {
     "bundle": {
