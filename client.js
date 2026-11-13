@@ -505,6 +505,20 @@ window.__ModuleLoader__.load({
                         'td',
                         { style: { ...styles.td, opacity: 0.7 } },
                         binding.lastInboundAt ? new Date(binding.lastInboundAt).toLocaleTimeString() : '—',
+                        binding.pending > 0
+                          ? h(
+                              'div',
+                              { style: { color: '#c08a00', fontSize: 11, marginTop: 2 } },
+                              `待补发 ${binding.pending} 条`,
+                            )
+                          : null,
+                        binding.needsActivation
+                          ? h(
+                              'div',
+                              { style: { color: '#d64545', fontSize: 11, marginTop: 2 } },
+                              '需微信侧激活：让对方给机器人发一条消息',
+                            )
+                          : null,
                       ),
                       h(
                         'td',

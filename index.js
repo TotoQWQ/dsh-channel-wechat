@@ -924,9 +924,9 @@ function createChannel(ctx, config) {
       saveState()
       return result
     } catch (err) {
-      // iLink 拒投（常见 ret=-2 prepare failed，多为 context_token 过期）时先入队，
+      // iLink 拒投（常见 ret=-2 prepare failed，多为 context_token 失效）时先入队，
       // 等下一次收到这个人的微信消息（带来新 token）后自动补发，避免静默丢消息。
-      binding.pending = [...(binding.pending ?? []), String(text)].slice(-20)
+      binding.pending = [...normalizePending(binding.pending), { text: String(text), at: Date.now() }].slice(-20)
       binding.lastError = String(err?.message ?? err)
       binding.nextRetryAt = Date.now() + 30_000
       saveState()
@@ -934,20 +934,47 @@ function createChannel(ctx, config) {
     }
   }
 
+  /** 兼容旧版（纯字符串数组）并统一成 {text, at}。 */
+  function normalizePending(list) {
+    return (Array.isArray(list) ? list : []).map((item) =>
+      typeof item === 'string' ? { text: item, at: 0 } : { text: String(item?.text ?? ''), at: Number(item?.at ?? 0) },
+    )
+  }
+
+  /** 队列里的旧消息不再补发：超过 PENDING_TTL_MS 的直接丢弃，避免刷屏。 */
+  const PENDING_TTL_MS = 10 * 60_000
+
   async function flushPending(binding) {
-    const queue = binding.pending ?? []
+    let queue = normalizePending(binding.pending).filter((item) => item.text)
+    if (queue.length === 0) {
+      binding.pending = []
+      return 0
+    }
+    const fresh = queue.filter((item) => Date.now() - item.at <= PENDING_TTL_MS)
+    const dropped = queue.length - fresh.length
+    if (dropped > 0) {
+      log('warn', 'pending expired, dropped', { key: binding.key, dropped })
+      binding.pending = fresh
+      saveState()
+    }
+    queue = fresh
     if (queue.length === 0) return 0
     if (Date.now() < (binding.nextRetryAt ?? 0)) return 0
     let sent = 0
     while (binding.pending.length > 0) {
+      const head = normalizePending(binding.pending)[0]
+      if (!head?.text) {
+        binding.pending = normalizePending(binding.pending).slice(1)
+        continue
+      }
       try {
         await sendToChat({
           accountId: binding.accountId,
           toUserId: binding.toUserId || String(binding.chatId).replace(/^user:/, ''),
           contextToken: binding.contextToken,
-          text: binding.pending[0],
+          text: head.text,
         })
-        binding.pending.shift()
+        binding.pending = normalizePending(binding.pending).slice(1)
         binding.lastOutboundAt = Date.now()
         binding.lastError = ''
         sent += 1
@@ -1255,8 +1282,9 @@ function createChannel(ctx, config) {
         explicit: Boolean(binding.explicit),
         live: Boolean(ctx.get('sessions')?.get?.(binding.sessionId)),
         lastSeq: Number(binding.lastSeq ?? 0),
-        pending: binding.pending?.length ?? 0,
+        pending: normalizePending(binding.pending).length,
         lastError: binding.lastError || null,
+        needsActivation: /prepare failed/i.test(String(binding.lastError ?? '')),
         lastInboundAt: binding.lastInboundAt ? new Date(binding.lastInboundAt).toISOString() : null,
         lastOutboundAt: binding.lastOutboundAt ? new Date(binding.lastOutboundAt).toISOString() : null,
       })),
