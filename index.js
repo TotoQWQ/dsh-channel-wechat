@@ -32,8 +32,8 @@ const ILINK_APP_ID = 'bot'
 /** 0x000MMNNPP：与官方 2.4.10 对齐 */
 const ILINK_APP_CLIENT_VERSION = (2 << 16) | (4 << 8) | 10
 /** 插件版本：与 package.json 保持一致，出现在 base_info.channel_version 里 */
-const CHANNEL_VERSION = '2.10.1'
-const BOT_AGENT = 'DSH-WeChat/2.10.1'
+const CHANNEL_VERSION = '2.11.0'
+const BOT_AGENT = 'DSH-WeChat/2.11.0'
 /** 媒体 CDN（官方 getUploadUrl 没返回 upload_full_url 时用它拼上传地址） */
 const CDN_BASE = 'https://novac2c.cdn.weixin.qq.com/c2c'
 
@@ -907,6 +907,18 @@ function normalizeConfig(raw) {
       Number.isFinite(c.sendBreakerMs) && c.sendBreakerMs >= 60_000
         ? Math.min(3600_000, c.sendBreakerMs)
         : 300_000,
+    // 流式分段：模型边生成边把「完整段落」发到微信，不用等整条回复结束
+    streamSegment: c.streamSegment !== false,
+    // 一个完整段落至少多少字才发（太短会刷屏）
+    streamMinChars:
+      Number.isFinite(c.streamMinChars) && c.streamMinChars >= 50
+        ? Math.min(2000, Math.floor(c.streamMinChars))
+        : 200,
+    // 两次流式发送的最小间隔（毫秒）
+    streamMinIntervalMs:
+      Number.isFinite(c.streamMinIntervalMs) && c.streamMinIntervalMs >= 0
+        ? Math.min(60_000, Math.floor(c.streamMinIntervalMs))
+        : 1500,
     stateDir,
   }
 }
@@ -2378,20 +2390,28 @@ function createChannel(ctx, config) {
     const framed = config.messagePrefix ? `${config.messagePrefix}${text}` : text
     binding.turnActive = true
     binding.turnActiveSince = Date.now()
+    beginWechatTurn(sessionId)
     try {
       await promptSession(sessionId, framed, signal)
       const reply = await waitForReply(sessionId, baseline, signal, timeoutMs)
       binding.lastSeq = currentSeq(sessionId)
-      const plain = reply || '（本轮没有产生文本回复）'
-      const decorated = reply ? decorateReply(plain, { level: config.cuteLevel, pool: config.cutePool }) : plain
-      await sendToBinding(binding, decorated)
-      try {
-        await maybeSendEmotions(binding.key, text, decorated)
-      } catch (err) {
-        log('warn', 'emotion auto failed', { key: binding.key, error: String(err?.message ?? err) })
+      // 已经把完整段落流式发出去的，只补发剩余部分，避免整条再发一遍
+      const remaining = takeStreamRemainder(sessionId, reply)
+      const toSend = remaining || (reply ? '' : '（本轮没有产生文本回复）')
+      const decorated = toSend
+        ? decorateReply(toSend, { level: config.cuteLevel, pool: config.cutePool })
+        : ''
+      if (decorated) {
+        await sendToBinding(binding, decorated)
+        try {
+          await maybeSendEmotions(binding.key, text, decorated)
+        } catch (err) {
+          log('warn', 'emotion auto failed', { key: binding.key, error: String(err?.message ?? err) })
+        }
       }
-      return { sessionId, reply: decorated }
+      return { sessionId, reply: decorated || reply }
     } finally {
+      endWechatTurn(sessionId)
       binding.turnActive = false
       delete binding.turnActiveSince
       binding.lastInboundAt = Date.now()
@@ -2912,6 +2932,98 @@ function createChannel(ctx, config) {
   /** sessionId → { text, sentLength, lastSentAt } */
   const thinking = new Map()
 
+  // -- 流式分段：边生成边发完整段落（微信没有流式，只能按段落推进） --------
+
+  const streamBuffers = new Map() // sessionId -> { text, sentText, lastSentAt }
+  const wechatTurns = new Set()
+
+  function beginWechatTurn(sessionId) {
+    wechatTurns.add(sessionId)
+    streamBuffers.delete(sessionId)
+  }
+
+  function endWechatTurn(sessionId) {
+    wechatTurns.delete(sessionId)
+    streamBuffers.delete(sessionId)
+  }
+
+  /**
+   * 收一段正文增量；返回已经「完整」的段落（以空行为界、够长、且过了最小间隔）。
+   * @param {string} sessionId 会话 id
+   * @param {string} delta 正文增量
+   * @returns {string[]} 可以发送的完整段落
+   */
+  function feedStreamText(sessionId, delta) {
+    if (!config.streamSegment) return []
+    const entry = streamBuffers.get(sessionId) ?? { text: '', sentText: '', lastSentAt: 0 }
+    entry.text += String(delta ?? '')
+    streamBuffers.set(sessionId, entry)
+    const segments = []
+    while (true) {
+      const boundary = entry.text.indexOf('\n\n')
+      if (boundary < 0) break
+      const candidate = entry.text.slice(0, boundary).trim()
+      if (candidate.length < config.streamMinChars) break
+      if (entry.lastSentAt && Date.now() - entry.lastSentAt < config.streamMinIntervalMs) break
+      segments.push(candidate)
+      entry.sentText += (entry.sentText ? '\n\n' : '') + candidate
+      entry.text = entry.text.slice(boundary + 2)
+      entry.lastSentAt = Date.now()
+    }
+    return segments
+  }
+
+  /**
+   * 最终回复里扣掉已经流式发出去的前缀，只发剩余部分（防止整条再发一遍）。
+   * @param {string} sessionId 会话 id
+   * @param {string} reply 模型最终文本
+   * @returns {string} 还需要发送的文本
+   */
+  function takeStreamRemainder(sessionId, reply) {
+    const entry = streamBuffers.get(sessionId)
+    streamBuffers.delete(sessionId)
+    const value = String(reply ?? '')
+    if (!entry?.sentText) return value
+    if (value.startsWith(entry.sentText)) return value.slice(entry.sentText.length).trimStart()
+    return value
+  }
+
+  /** 把完整段落发到绑定的微信；失败就进补发队列（不会和最终回复重复）。 */
+  async function sendStreamSegments(sessionId, segments) {
+    if (!config.streamSegment || (segments?.length ?? 0) === 0) return 0
+    const targets = optionTargets(sessionId)
+    if (targets.length === 0) return 0
+    let sent = 0
+    for (const binding of targets) {
+      for (const segment of segments) {
+        try {
+          const formatted = formatWechatText(segment, { maxLine: config.formatMaxLine })
+          const chunks = segmentText(formatted, {
+            maxChars: config.segmentMaxChars || config.maxReplyChars,
+            mode: config.segmentMode,
+          })
+          for (const chunk of chunks) {
+            await sendToChat({
+              accountId: binding.accountId,
+              toUserId: binding.toUserId || String(binding.chatId).replace(/^user:/, ''),
+              contextToken: binding.contextToken,
+              text: chunk,
+            })
+          }
+          binding.lastOutboundAt = Date.now()
+          sent += 1
+        } catch (err) {
+          binding.pending = [...normalizePending(binding.pending), { text: segment, at: Date.now() }].slice(-20)
+          binding.lastError = String(err?.message ?? err)
+          binding.nextRetryAt = Date.now() + 30_000
+          saveState()
+          log('warn', 'stream segment queued', { key: binding.key, error: String(err?.message ?? err) })
+        }
+      }
+    }
+    return sent
+  }
+
   function observeAssistantStream(payload) {
     try {
       const sessionId = String(payload?.agent?.id ?? '')
@@ -2923,6 +3035,18 @@ function createChannel(ctx, config) {
       }
       if (frame.type !== 'chunk') return
       const chunk = frame.chunk
+      // 正文增量：微信这一轮进行中时，按「完整段落」边生成边发
+      if (chunk?.type === 'text-delta' && typeof chunk.text === 'string' && chunk.text) {
+        if (wechatTurns.has(sessionId)) {
+          const segments = feedStreamText(sessionId, chunk.text)
+          if (segments.length > 0) {
+            void sendStreamSegments(sessionId, segments).catch((err) =>
+              log('warn', 'stream segment send failed', { sessionId, error: String(err?.message ?? err) }),
+            )
+          }
+        }
+        return
+      }
       if (!chunk || chunk.type !== 'reasoning-delta' || typeof chunk.text !== 'string' || !chunk.text) return
       if (!config.thinkingSummary) return
       const entry = thinking.get(sessionId) ?? { text: '', sentLength: 0, lastSentAt: 0 }
@@ -3718,6 +3842,7 @@ function createChannel(ctx, config) {
     if (type === 'turn/end') {
       activeTurns.delete(sessionId)
       thinking.delete(sessionId)
+      streamBuffers.delete(sessionId)
     }
   }
 
@@ -4403,6 +4528,11 @@ function createChannel(ctx, config) {
     handleInbound,
     observeSessionEvent,
     observeAssistantStream,
+    beginWechatTurn,
+    endWechatTurn,
+    feedStreamText,
+    takeStreamRemainder,
+    sendStreamSegments,
     maybeSendThinking,
     healthSummary,
     healthTick,
