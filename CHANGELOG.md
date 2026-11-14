@@ -6,6 +6,22 @@
 
 ---
 
+## 2.18.2 — 2026-11-14
+
+### 测试（无行为变更）
+
+- `test-files.mjs` 扩到 8 项：
+  - 附件没有 hostPath 时用 `readImage` / `readFileStream` 回退并从 outbound 发送；
+  - 带空格的本地路径（引号内）也能识别；
+  - `mirrorFiles: false` 时只发文本、不发文件。
+- `test-features.mjs` 扩到 7 项：HTTP `GET/POST /wechat-channel/features` 读写开关、未知开关拒绝、`mirrorFiles` 默认值。
+
+### 变更
+
+- 版本 2.18.1 → 2.18.2（`CHANNEL_VERSION` / `bot_agent` 同步）。
+
+---
+
 ## 2.18.1 — 2026-11-14
 
 ### 修复

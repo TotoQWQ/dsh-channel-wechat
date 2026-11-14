@@ -97,6 +97,7 @@ try {
     assert.equal(features.riskAlert, false)
     assert.equal(features.emotionAuto, true)
     assert.equal(features.autoHotReload, false)
+    assert.equal(features.mirrorFiles, true)
   })
 
   await check('setFeature 立即生效并写回 snapshot', async () => {
@@ -125,6 +126,38 @@ try {
     const result = channel.setFeature('not-a-feature', true)
     assert.equal(result.ok, false)
     assert.match(result.message, /未知功能开关/)
+  })
+
+  await check('HTTP /features 读写开关', async () => {
+    const callHttp = (method, url, body) =>
+      new Promise((resolve) => {
+        const chunks = body === undefined ? [] : [Buffer.from(JSON.stringify(body))]
+        const req = {
+          method,
+          url,
+          async *[Symbol.asyncIterator]() {
+            for (const chunk of chunks) yield chunk
+          },
+        }
+        let status = 0
+        const res = {
+          writeHead(code) { status = code },
+          end(text) { resolve({ status, body: JSON.parse(text) }) },
+        }
+        void channel.handleHttp(req, res)
+      })
+    const listed = await callHttp('GET', '/wechat-channel/features')
+    assert.equal(listed.status, 200)
+    assert.equal(listed.body.features.mirrorFiles, true)
+    assert.equal(listed.body.labels.mirrorFiles, '输出文件转发')
+    const toggled = await callHttp('POST', '/wechat-channel/features', { name: 'mirrorFiles', value: false })
+    assert.equal(toggled.body.ok, true)
+    assert.equal(toggled.body.features.mirrorFiles, false)
+    assert.equal(channel.snapshot().features.mirrorFiles, false)
+    const unknown = await callHttp('POST', '/wechat-channel/features', { name: 'nope', value: true })
+    assert.equal(unknown.body.ok, false)
+    // 恢复，避免影响后续其它检查
+    channel.setFeature('mirrorFiles', true)
   })
 
   await check('配置文件显式开启优先于默认', async () => {

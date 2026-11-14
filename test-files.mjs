@@ -92,8 +92,11 @@ const liveSession = {
 const attachments = {
   imageHostPath: (ref) => (ref.attachmentId === 'img-1' ? png : undefined),
   fileHostPath: (ref) => (ref.attachmentId === 'file-1' ? pdf : undefined),
-  readImage: async () => { throw new Error('not needed') },
-  readFileStream: async () => { throw new Error('not needed') },
+  readImage: async (ref) => ({ ref, data: Buffer.from([0x89, 0x50, 0x4e, 0x47, 7, 7, 7]) }),
+  readFileStream: async function* (ref) {
+    if (ref.attachmentId !== 'file-2') throw new Error('not needed')
+    yield Buffer.from('%PDF fallback')
+  },
 }
 const ctx = {
   get: (name) => {
@@ -194,6 +197,60 @@ try {
     const sentFiles = await channel.forwardTurnFiles(turnBinding, sessionId, 20)
     assert.equal(sentFiles, 1)
     assert.equal(items.filter((item) => item.type === 2).length, 1)
+  })
+  await check('附件没有 hostPath 时用 readImage 回退', async () => {
+    reset()
+    const fallbackRef = { attachmentId: 'img-2', mediaType: 'image/png', bytes: 7, width: 1, height: 1, name: 'fallback.png' }
+    currentEvents = [
+      { type: 'assistant/message', seq: 30, time: Date.now(), data: { message: { blocks: [{ type: 'image', attachment: fallbackRef }] } } },
+    ]
+    liveSession.seq = 31
+    const sentFiles = await channel.forwardTurnFiles(binding, sessionId, 30)
+    assert.equal(sentFiles, 1)
+    assert.equal(items.filter((item) => item.type === 2).length, 1)
+    assert.ok(fs.existsSync(path.join(stateDir, 'outbound')), '回退文件应写到 outbound')
+  })
+
+  await check('mirrorFiles=false 时只发文本、不发文件', async () => {
+    reset()
+    const dir2 = path.join(root, 'state-off')
+    fs.mkdirSync(dir2, { recursive: true })
+    fs.copyFileSync(path.join(stateDir, 'state.json'), path.join(dir2, 'state.json'))
+    const quiet = createChannel(ctx, { ...baseConfig, stateDir: dir2, mirrorFiles: false })
+    currentEvents = [
+      { type: 'assistant/message', seq: 40, time: Date.now(), data: { message: { blocks: [{ type: 'text', text: `图片 ${png}` }] } } },
+    ]
+    liveSession.seq = 41
+    const report = await quiet.scanAndMirror(
+      { key: `${accountId}::${chatId}`, accountId, chatId, toUserId: chatId.replace(/^user:/, ''), sessionId, contextToken: 'ctx-token' },
+      40,
+      41,
+      { send: true },
+    )
+    assert.equal(report.ok, true)
+    assert.equal(items.filter((item) => item.type === 2).length, 0)
+    assert.equal(report.candidates.filter((item) => item.kind === 'file').length, 0)
+    quiet.stop()
+  })
+  await check('文件附件没有 hostPath 时用 readFileStream 回退', async () => {
+    reset()
+    const fallbackFile = { attachmentId: 'file-2', name: 'fallback.pdf', bytes: 13 }
+    currentEvents = [
+      { type: 'assistant/message', seq: 50, time: Date.now(), data: { message: { blocks: [{ type: 'file', attachment: fallbackFile }] } } },
+    ]
+    liveSession.seq = 51
+    const sentFiles = await channel.forwardTurnFiles(binding, sessionId, 50)
+    assert.equal(sentFiles, 1)
+    assert.equal(items.filter((item) => item.type === 4).length, 1)
+    const outbound = path.join(stateDir, 'outbound')
+    assert.ok(fs.readdirSync(outbound).some((name) => name.endsWith('fallback.pdf')))
+  })
+
+  await check('带空格的本地路径（引号内）也能识别', async () => {
+    const spaced = path.join(root, '带 空格 文件.pdf')
+    fs.writeFileSync(spaced, '%PDF spaced')
+    const found = channel.collectTextFilePaths(`报告："${spaced}"`, root)
+    assert.ok(found.includes(spaced), JSON.stringify(found))
   })
 } finally {
   channel.stop()
