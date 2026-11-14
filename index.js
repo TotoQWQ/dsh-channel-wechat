@@ -37,8 +37,8 @@ const ILINK_APP_ID = 'bot'
 /** 0x000MMNNPP：与官方 2.4.10 对齐 */
 const ILINK_APP_CLIENT_VERSION = (2 << 16) | (4 << 8) | 10
 /** 插件版本：与 package.json 保持一致，出现在 base_info.channel_version 里 */
-const CHANNEL_VERSION = '2.17.1'
-const BOT_AGENT = 'DSH-WeChat/2.17.1'
+const CHANNEL_VERSION = '2.18.0'
+const BOT_AGENT = 'DSH-WeChat/2.18.0'
 /** 媒体 CDN（官方 getUploadUrl 没返回 upload_full_url 时用它拼上传地址） */
 const CDN_BASE = 'https://novac2c.cdn.weixin.qq.com/c2c'
 
@@ -1196,6 +1196,12 @@ function normalizeConfig(raw) {
     hotReload: c.hotReload !== false,
     // 文件变更后自动热重载（默认关，避免编辑到一半就重载）
     autoHotReload: c.autoHotReload === true,
+    // 把 AI 输出文件（消息附件 / 文本里提到的本地文件）转发到微信
+    mirrorFiles: c.mirrorFiles !== false,
+    mirrorFileMaxBytes:
+      Number.isFinite(c.mirrorFileMaxBytes) && c.mirrorFileMaxBytes >= 1024
+        ? Math.min(50 * 1024 * 1024, Math.floor(c.mirrorFileMaxBytes))
+        : 50 * 1024 * 1024,
     stateDir,
   }
 }
@@ -1260,6 +1266,7 @@ function createChannel(ctx, config) {
     riskAlert: '风险消息邮件',
     emotionAuto: '自动表情',
     autoHotReload: '自动热重载',
+    mirrorFiles: '输出文件转发',
   }
 
   function featureValues() {
@@ -1271,6 +1278,7 @@ function createChannel(ctx, config) {
       riskAlert: config.riskAlert === true,
       emotionAuto: config.emotionAuto !== 'off',
       autoHotReload: config.autoHotReload === true,
+      mirrorFiles: config.mirrorFiles === true,
     }
   }
 
@@ -1285,6 +1293,7 @@ function createChannel(ctx, config) {
     if (typeof overrides.riskAlert === 'boolean') config.riskAlert = overrides.riskAlert
     if (typeof overrides.emotionAuto === 'boolean') config.emotionAuto = overrides.emotionAuto ? 'subtle' : 'off'
     if (typeof overrides.autoHotReload === 'boolean') config.autoHotReload = overrides.autoHotReload
+    if (typeof overrides.mirrorFiles === 'boolean') config.mirrorFiles = overrides.mirrorFiles
   }
 
   /**
@@ -4780,6 +4789,197 @@ function createChannel(ctx, config) {
 
   // -- 出站镜像：会话 → 微信 -----------------------------------------------
 
+  // -- 输出文件转发：消息附件 + 文本里提到的本地文件 ------------------------
+
+  const MIRROR_FILE_EXTS = new Set([
+    'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp',
+    'mp4', 'mov', 'webm',
+    'pdf', 'doc', 'docx', 'ppt', 'pptx', 'xls', 'xlsx', 'csv',
+    'zip', 'rar', '7z', 'txt', 'md',
+  ])
+  const MIRROR_FILE_EXT_PATTERN = 'png|jpe?g|gif|webp|bmp|mp4|mov|webm|pdf|docx?|pptx?|xlsx?|csv|zip|rar|7z|txt|md'
+
+  /** 递归找出事件里所有 image/file 附件块。 */
+  function collectAttachmentRefs(value, out = [], depth = 0) {
+    if (!value || typeof value !== 'object' || depth > 8) return out
+    if (Array.isArray(value)) {
+      for (const item of value) collectAttachmentRefs(item, out, depth + 1)
+      return out
+    }
+    if (value.type === 'image' && value.attachment?.attachmentId) {
+      out.push({ kind: 'image', attachment: value.attachment })
+    } else if (value.type === 'file' && value.attachment?.attachmentId) {
+      out.push({ kind: 'file', attachment: value.attachment })
+    }
+    for (const [key, child] of Object.entries(value)) {
+      if (key === 'attachment') continue
+      collectAttachmentRefs(child, out, depth + 1)
+    }
+    return out
+  }
+
+  /** 从助手文本里提取可能存在的本地文件路径（只保留存在的文件）。 */
+  function collectTextFilePaths(text, cwd) {
+    const value = String(text ?? '')
+    const found = []
+    const seen = new Set()
+    const patterns = [
+      { re: /[A-Za-z]:\\[^\r\n"'`<>|]+?\.(png|jpe?g|gif|webp|bmp|mp4|mov|webm|pdf|docx?|pptx?|xlsx?|csv|zip|rar|7z|txt|md)\b/gi, group: 0 },
+      { re: /(?:^|[\s("'`])((?:\.{0,2}[\\/])?(?:[\w.\-\u4e00-\u9fa5]+[\\/])*[\w.\-\u4e00-\u9fa5]+\.(png|jpe?g|gif|webp|bmp|mp4|mov|webm|pdf|docx?|pptx?|xlsx?|csv|zip|rar|7z|txt|md))\b/gim, group: 1 },
+    ]
+    for (const pattern of patterns) {
+      for (const match of value.matchAll(pattern.re)) {
+        const raw = String(match[pattern.group] ?? '').replace(/^[\s("'`]+/, '').trim()
+        if (!raw) continue
+        const full = path.isAbsolute(raw) ? raw : path.resolve(cwd || process.cwd(), raw)
+        if (seen.has(full)) continue
+        seen.add(full)
+        try {
+          const stat = fs.statSync(full)
+          if (stat.isFile()) found.push(full)
+        } catch {
+          /* 文件不存在就忽略 */
+        }
+      }
+    }
+    return found
+  }
+
+  /** 把附件解析成本地文件路径；host 后端不落盘时读出来写到 outbound 目录。 */
+  async function resolveAttachmentPath(kind, ref) {
+    const attachments = ctx.get('attachments')
+    if (!attachments) return null
+    try {
+      const hostPath = kind === 'image' ? attachments.imageHostPath?.(ref) : attachments.fileHostPath?.(ref)
+      if (hostPath && fs.existsSync(hostPath)) return hostPath
+      if (kind === 'image' && attachments.readImage) {
+        const stored = await attachments.readImage(ref, new AbortController().signal)
+        const ext =
+          ref.mediaType === 'image/jpeg'
+            ? '.jpg'
+            : ref.mediaType === 'image/webp'
+              ? '.webp'
+              : ref.mediaType === 'image/gif'
+                ? '.gif'
+                : '.png'
+        const dir = path.join(config.stateDir, 'outbound')
+        fs.mkdirSync(dir, { recursive: true })
+        const file = path.join(dir, `img-${String(ref.attachmentId)}${ext}`)
+        fs.writeFileSync(file, Buffer.from(stored.data))
+        return file
+      }
+      if (kind === 'file' && attachments.readFileStream) {
+        const chunks = []
+        for await (const chunk of attachments.readFileStream(ref, new AbortController().signal)) {
+          chunks.push(Buffer.from(chunk))
+        }
+        const dir = path.join(config.stateDir, 'outbound')
+        fs.mkdirSync(dir, { recursive: true })
+        const name = String(ref.name ?? 'file').replace(/[\\/:*?"<>|]/g, '_') || 'file'
+        const file = path.join(dir, `${String(ref.attachmentId)}-${name}`)
+        fs.writeFileSync(file, Buffer.concat(chunks))
+        return file
+      }
+      return null
+    } catch (err) {
+      log('warn', 'resolve attachment failed', { kind, error: String(err?.message ?? err) })
+      return null
+    }
+  }
+
+  /** 记录/检查某个文件的发送去重；返回 true 表示应该发。 */
+  function shouldForwardMirrorFile(binding, key) {
+    const sentMap = binding.mirrorFileSent && typeof binding.mirrorFileSent === 'object' ? binding.mirrorFileSent : {}
+    const now = Date.now()
+    for (const [itemKey, at] of Object.entries(sentMap)) {
+      if (now - Number(at ?? 0) > 24 * 3600_000) delete sentMap[itemKey]
+    }
+    binding.mirrorFileSent = sentMap
+    if (sentMap[key]) return false
+    return true
+  }
+
+  function markMirrorFileSent(binding, key) {
+    const sentMap = binding.mirrorFileSent && typeof binding.mirrorFileSent === 'object' ? binding.mirrorFileSent : {}
+    sentMap[key] = Date.now()
+    const keys = Object.keys(sentMap)
+    while (keys.length > 200) delete sentMap[keys.shift()]
+    binding.mirrorFileSent = sentMap
+    saveState()
+  }
+
+  /**
+   * 把一条事件里的输出文件发到微信（附件块 + 文本提到的本地文件）。
+   * @returns {Promise<number>} 实际发送数量
+   */
+  async function mirrorEventFiles(binding, event, text, cwd, candidates, send) {
+    if (!config.mirrorFiles) return 0
+    const items = []
+    for (const ref of collectAttachmentRefs(event.data)) {
+      items.push({
+        kind: ref.kind,
+        key: `attachment:${String(ref.attachment.attachmentId)}`,
+        name: String(ref.attachment.name ?? ref.attachment.attachmentId),
+        attachment: ref.attachment,
+      })
+    }
+    for (const file of collectTextFilePaths(text, cwd)) {
+      items.push({ kind: 'path', key: `path:${file}`, name: path.basename(file), path: file })
+    }
+    let sent = 0
+    for (const item of items) {
+      if (!shouldForwardMirrorFile(binding, item.key)) continue
+      let filePath = item.path ?? null
+      if (!filePath && item.attachment) {
+        if (!send) {
+          candidates.push({ kind: 'file', name: item.name, attachmentId: String(item.attachment.attachmentId) })
+          continue
+        }
+        filePath = await resolveAttachmentPath(item.kind, item.attachment)
+      }
+      if (!filePath) {
+        candidates.push({ kind: 'file', name: item.name, error: '无法解析为本地文件' })
+        continue
+      }
+      // 同一文件（附件 + 文本路径都提到）只发一次
+      if (binding.mirrorFileSent && binding.mirrorFileSent[`path:${filePath}`]) continue
+      let size = 0
+      try {
+        size = fs.statSync(filePath).size
+      } catch {
+        size = 0
+      }
+      if (!size) {
+        candidates.push({ kind: 'file', name: item.name, error: '文件不存在或为空' })
+        continue
+      }
+      if (size > config.mirrorFileMaxBytes) {
+        candidates.push({ kind: 'file', name: item.name, error: `文件超过 ${Math.round(config.mirrorFileMaxBytes / 1048576)} MB` })
+        continue
+      }
+      if (!send) {
+        candidates.push({ kind: 'file', name: item.name, path: filePath, bytes: size })
+        continue
+      }
+      try {
+        await sendMediaToChat({
+          accountId: binding.accountId,
+          toUserId: binding.toUserId || String(binding.chatId).replace(/^user:/, ''),
+          contextToken: binding.contextToken,
+          filePath,
+        })
+        markMirrorFileSent(binding, item.key)
+        markMirrorFileSent(binding, `path:${filePath}`)
+        sent += 1
+        candidates.push({ kind: 'file', name: item.name, path: filePath, bytes: size })
+      } catch (err) {
+        candidates.push({ kind: 'file', name: item.name, path: filePath, error: String(err?.message ?? err) })
+        log('warn', 'mirror file forward failed', { key: binding.key, file: filePath, error: String(err?.message ?? err) })
+      }
+    }
+    return sent
+  }
+
   async function scanAndMirror(binding, from, to, options = {}) {
     const send = options.send === true
     const session = ctx.get('sessions')?.get?.(binding.sessionId)
@@ -4795,6 +4995,12 @@ function createChannel(ctx, config) {
     }
     const candidates = []
     let sent = 0
+    let cwd = ''
+    try {
+      cwd = String(ctx.get('workingDirectory')?.get?.(session) ?? '')
+    } catch {
+      cwd = ''
+    }
     for (const event of events) {
       if (event?.type === 'assistant/message' && config.mirrorAssistantMessages) {
         const text = textOfMessage(event.data?.message)
@@ -4808,6 +5014,10 @@ function createChannel(ctx, config) {
               candidates[candidates.length - 1].error = String(err?.message ?? err)
             }
           }
+        }
+        // AI 输出文件：消息里的 image/file 附件，以及文本里提到的本地文件
+        if (config.mirrorFiles) {
+          sent += await mirrorEventFiles(binding, event, text, cwd, candidates, send)
         }
       } else if (event?.type === 'user/message' && config.mirrorUserMessages) {
         const source = event.data?.source ?? event.data?.message?.source
@@ -5257,6 +5467,10 @@ function createChannel(ctx, config) {
     progressTick,
     sendProgressMessage,
     sendPauseRemaining,
+    mirrorTick,
+    scanAndMirror,
+    collectTextFilePaths,
+    collectAttachmentRefs,
     flushPending,
     running: () => Boolean(progressTimer || mirrorTimer || healthTimer),
     sendHealth: () => Object.fromEntries(sendHealth),

@@ -55,6 +55,7 @@ window.__ModuleLoader__.load({
       ['progressHeartbeat', '进度心跳', '长任务每隔一段时间报「还在处理」'],
       ['riskAlert', '风险消息邮件', '命中风险规则时给宿主发邮件'],
       ['autoHotReload', '自动热重载', '文件变化后自动应用（每 30 秒检查）'],
+      ['mirrorFiles', '输出文件转发', 'AI 产出的图片/文件自动发到微信'],
     ]
 
     const styles = {

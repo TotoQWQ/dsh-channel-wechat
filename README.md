@@ -38,7 +38,8 @@
 - **风险消息邮件预警**（可选，默认关）：`riskAlert: true` 后，入站文本命中规则（内置赌博 / 诈骗刷单 / 色情 / 引流外链，可用 `riskPatterns` 覆盖）时，用 SMTP 给宿主发一封邮件（含时间、账号、聊天、命中的规则与原文片段），**消息照常转发、不拦截不改写**；同一聊天有 `riskCooldownMs` 冷却（默认 5 分钟）。`/risk` 查看状态，`/risk test` 发测试邮件。
 - **自动化任务反馈**：定时任务（`schedule` 服务）投递到已绑定微信的会话后，这一轮结束时会往微信发一条 `⏰ 定时任务完成：「标题」· 用时 X`；通过任务的 `lastDelivery` 与 `turn/start` 时间窗口判断（默认前后 2 分钟），`automationReport: false` 可关。`/tasks`（`/schedule`）可直接查看当前定时任务列表。
 - **热重载**：改完插件文件不用重启 DSH——微信里发 `/reload`（或 `POST /wechat-channel/reload`）会调用 DSH HMR 的 `reconcileProfile()`，重新读取 profile 里变化的插件文件并重启对应 entry；`hotReload: false` 可禁用。可选 `autoHotReload: true` 后每 30 秒检查 `index.js` 修改时间，变化后自动热重载（默认关，避免编辑到一半就重载）。客户端面板（`client.js`）属于浏览器 bundle，热重载后仍需刷新页面。
-- **功能开关（面板）**：Web GUI「微信」面板底部有「功能开关」卡片，可勾选/取消**思考片段摘要、流式分段、自动表情、定时任务完成通知、进度心跳、风险消息邮件、自动热重载**；改动立即生效并写入 `state.json`（`settings.features`），重启后保持。命令类功能（`/ping`、`/resend`、`/suggest`、`/tasks`、`/risk`、`/reload`、`/emotion`）始终可用。
+- **功能开关（面板）**：Web GUI「微信」面板底部有「功能开关」卡片，可勾选/取消**思考片段摘要、流式分段、自动表情、定时任务完成通知、进度心跳、风险消息邮件、自动热重载、输出文件转发**；改动立即生效并写入 `state.json`（`settings.features`），重启后保持。命令类功能（`/ping`、`/resend`、`/suggest`、`/tasks`、`/risk`、`/reload`、`/emotion`）始终可用。
+- **输出文件转发**：AI 在会话里产出的文件会自动发到微信——包括助手消息里的 `image`/`file` 附件，以及回复文本里提到的本地文件（图片、视频、PDF、Office、压缩包、txt/md 等；`.js` 等源码不会自动发）；同一文件只发一次，超过 `mirrorFileMaxBytes`（默认 50MB）或解析失败会记日志并跳过。`mirrorFiles: false` 可关。
 - **投递恢复**：发送失败（如 iLink `ret=-2 prepare failed`）的回复自动进补发队列（保留 `pendingTtlMs`，默认 6 小时），任一新消息带回 `context_token` 后**先自动补发**再处理新消息（并清除该账号的发送熔断）；`/resend` 可手动补发；连续 `sendBreakerThreshold` 次**真实回复**失败后熔断 `sendBreakerMs`（默认 5 分钟），进度/思考类附加消息**不参与熔断**、熔断期间静默跳过、失败日志每分钟最多一条；进度心跳失败会退避 2 分钟、不再刷屏；同一进程同一 stateDir 只保留一个活跃实例（防热重载泄漏出多个轮询/定时器）。
 - **消息插进正在跑的对话**：会话正在跑时（不管是谁发起的），微信里新来的消息用 `steer` 直接插进**当前这一轮**，在下一个 step 边界被模型看到，不用等这一轮结束；会话空闲时才按普通一轮一答处理。插入会给一次「📥 已插入当前对话」回执（10 秒内多次插入只回一次）。
   - 「在跑」的判断：优先 `sessionController.state` 的真实 `running`，其次 `turn/start`・`turn/end` 跟踪；`turnActive` 只是运行时兜底标记，不写入 `state.json`，重启后按会话真实状态重新判断（避免上次没跑完的轮次被当成一直在跑）。
@@ -190,6 +191,8 @@ plugin_manager: install_bundle  target=<本目录的绝对路径>
 | `automationReport` | `true` | 定时任务完成时给绑定微信发通知 |
 | `automationWindowMs` | `120000` | 判断「这一轮由定时任务触发」的时间窗口 |
 | `hotReload` | `true` | 允许 `/reload` 触发热重载 |
+| `mirrorFiles` | `true` | AI 输出文件（附件 + 文本路径）自动转发微信 |
+| `mirrorFileMaxBytes` | `52428800` | 转发的文件大小上限（默认 50MB） |
 | `autoHotReload` | `false` | 文件变化后自动热重载（每 30 秒检查） |
 | `apiBase` | `https://ilinkai.weixin.qq.com` | iLink 服务地址 |
 
