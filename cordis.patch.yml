@@ -112,6 +112,10 @@
         automationReport: true
         # 判断「这一轮是定时任务触发」的时间窗口（毫秒）
         automationWindowMs: 120000
+        # 热重载：/reload 或 POST /wechat-channel/reload 触发（不用重启 DSH）
+        hotReload: true
+        # 文件变更后自动热重载（默认关，避免编辑到一半就重载）
+        autoHotReload: false
         # 跨账号转发：同一会话下，A 号收到的消息也发到 B/C 号的微信
         relayAcrossAccounts: true
         relayPrefix: '[{account}] '

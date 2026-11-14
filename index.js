@@ -22,6 +22,7 @@ import os from 'node:os'
 import path from 'node:path'
 import tls from 'node:tls'
 import zlib from 'node:zlib'
+import { fileURLToPath } from 'node:url'
 
 import qrcode from './vendor/qrcode.mjs'
 
@@ -30,12 +31,14 @@ import qrcode from './vendor/qrcode.mjs'
 // ---------------------------------------------------------------------------
 
 const DEFAULT_API_BASE = 'https://ilinkai.weixin.qq.com'
+/** 插件自身目录（热重载时用来比较 index.js 的修改时间）。 */
+const PLUGIN_DIR = path.dirname(fileURLToPath(import.meta.url))
 const ILINK_APP_ID = 'bot'
 /** 0x000MMNNPP：与官方 2.4.10 对齐 */
 const ILINK_APP_CLIENT_VERSION = (2 << 16) | (4 << 8) | 10
 /** 插件版本：与 package.json 保持一致，出现在 base_info.channel_version 里 */
-const CHANNEL_VERSION = '2.14.0'
-const BOT_AGENT = 'DSH-WeChat/2.14.0'
+const CHANNEL_VERSION = '2.15.0'
+const BOT_AGENT = 'DSH-WeChat/2.15.0'
 /** 媒体 CDN（官方 getUploadUrl 没返回 upload_full_url 时用它拼上传地址） */
 const CDN_BASE = 'https://novac2c.cdn.weixin.qq.com/c2c'
 
@@ -547,6 +550,7 @@ const WECHAT_COMMANDS = new Set([
   'risk',
   'tasks',
   'schedule',
+  'reload',
   'help',
   '?',
 ])
@@ -572,6 +576,7 @@ const WECHAT_HELP_TEXT = [
   '/suggest <内容>  把你的需求提交成 GitHub issue',
   '/risk      风险消息邮件预警状态（/risk test 发测试邮件）',
   '/tasks     查看定时任务（/tasks 别名 /schedule）',
+  '/reload    热重载插件（应用新文件，不用重启 DSH）',
   '/stop      停止当前这一轮',
   '/help      这条帮助',
   '',
@@ -1190,6 +1195,10 @@ function normalizeConfig(raw) {
       Number.isFinite(c.automationWindowMs) && c.automationWindowMs >= 60_000
         ? Math.min(3600_000, Math.floor(c.automationWindowMs))
         : 120_000,
+    // 热重载：通过 DSH HMR 的 reconcileProfile 应用新文件，不用重启整个应用
+    hotReload: c.hotReload !== false,
+    // 文件变更后自动热重载（默认关，避免编辑到一半就重载）
+    autoHotReload: c.autoHotReload === true,
     stateDir,
   }
 }
@@ -1235,6 +1244,9 @@ function createChannel(ctx, config) {
   let saveTimer = null
   let progressTimer = null
   let healthTimer = null
+  let hotReloadTimer = null
+  let hotReloadBaseline = 0
+  let lastHotReloadAt = 0
 
   // 构造时先读一次状态：工具与测试可以直接使用绑定表；start() 会再读一次（幂等）
   loadState()
@@ -3910,6 +3922,13 @@ function createChannel(ctx, config) {
       await replyText(binding, lines.join('\n'))
       return true
     }
+    if (name === 'reload') {
+      await replyText(binding, '♻️ 正在热重载插件（应用最新文件），稍等几秒…')
+      setTimeout(() => {
+        void hotReloadPlugin('wechat-command')
+      }, 300)
+      return true
+    }
     if (name === 'stop') {
       const controller = ctx.get('sessionController')
       if (!controller?.cancel) {
@@ -4473,6 +4492,66 @@ function createChannel(ctx, config) {
     return restarted
   }
 
+  // -- 热重载：调用 DSH HMR 的 reconcileProfile 应用新文件 --------------------
+
+  function pluginIndexMtime() {
+    try {
+      return fs.statSync(path.join(PLUGIN_DIR, 'index.js')).mtimeMs
+    } catch {
+      return 0
+    }
+  }
+
+  /**
+   * 触发热重载：让 DSH 重新读取 profile 里变化的插件文件并重启对应 entry。
+   * @param {string} [reason] 触发来源（manual / wechat-command / auto-watch）
+   * @returns {Promise<{ ok: boolean, message?: string, pending?: unknown[], warnings?: unknown[] }>}
+   */
+  async function hotReloadPlugin(reason = 'manual') {
+    if (!config.hotReload) return { ok: false, message: 'hotReload 已关闭' }
+    const hmr = ctx.get('hmr')
+    if (!hmr?.reconcileProfile) {
+      return { ok: false, message: 'HMR 服务不可用（需要 DSH 提供 hmr.reconcileProfile）' }
+    }
+    try {
+      const result = await hmr.reconcileProfile()
+      log('info', 'hot reload applied', {
+        reason,
+        pending: Array.isArray(result?.pending) ? result.pending.length : 0,
+        restartReason: result?.restartReason ?? null,
+      })
+      return { ok: true, pending: result?.pending ?? [], warnings: result?.warnings ?? [] }
+    } catch (err) {
+      const message = String(err?.message ?? err)
+      log('warn', 'hot reload failed', { reason, error: message })
+      return { ok: false, message }
+    }
+  }
+
+  function startHotReloadWatch() {
+    if (!config.autoHotReload || hotReloadTimer) return
+    hotReloadBaseline = pluginIndexMtime()
+    hotReloadTimer = setInterval(() => {
+      try {
+        const mtime = pluginIndexMtime()
+        if (!mtime || mtime === hotReloadBaseline) return
+        const now = Date.now()
+        if (now - lastHotReloadAt < 10_000) return
+        lastHotReloadAt = now
+        hotReloadBaseline = mtime
+        void hotReloadPlugin('auto-watch')
+      } catch (err) {
+        log('warn', 'hot reload watch failed', { error: String(err?.message ?? err) })
+      }
+    }, 30_000)
+    if (typeof hotReloadTimer?.unref === 'function') hotReloadTimer.unref()
+  }
+
+  function stopHotReloadWatch() {
+    if (hotReloadTimer) clearInterval(hotReloadTimer)
+    hotReloadTimer = null
+  }
+
   function startHealth() {
     if (healthTimer) return
     healthTimer = setInterval(() => {
@@ -4870,6 +4949,9 @@ function createChannel(ctx, config) {
           quotes: Object.keys(quotes).length,
         })
       }
+      if (method === 'POST' && route === 'reload') {
+        return json(res, await hotReloadPlugin('http'))
+      }
       if (method === 'GET' && route === 'mirror-probe') {
         const fromParam = Number(url.searchParams.get('from') ?? NaN)
         const send = url.searchParams.get('send') === '1'
@@ -5031,6 +5113,7 @@ function createChannel(ctx, config) {
     startMirror()
     startProgress()
     startHealth()
+    startHotReloadWatch()
     log('info', 'channel started', { accounts: accounts().length, quotes: Object.keys(quotes).length })
   }
 
@@ -5039,6 +5122,7 @@ function createChannel(ctx, config) {
     stopMirror()
     stopProgress()
     stopHealth()
+    stopHotReloadWatch()
     login.abort?.abort()
     login.abort = null
     if (saveTimer) {
@@ -5077,6 +5161,9 @@ function createChannel(ctx, config) {
     detectAutomationTurn,
     notifyAutomationDone,
     finalizeAutomationTurn,
+    hotReloadPlugin,
+    startHotReloadWatch,
+    stopHotReloadWatch,
     progressTick,
     flushPending,
     running: () => Boolean(progressTimer || mirrorTimer || healthTimer),

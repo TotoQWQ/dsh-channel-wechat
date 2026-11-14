@@ -6,6 +6,23 @@
 
 ---
 
+## 2.15.0 — 2026-11-14
+
+### 新增
+
+- **热重载**（第一轮第 4 项）：不用重启 DSH 就能应用插件新文件。
+  - 微信 `/reload`（先回执再触发）或 `POST /wechat-channel/reload` → 调用 DSH HMR 的 `hmr.reconcileProfile()`，重新读取 profile 内变化的插件文件并重启对应 entry；
+  - 可选 `autoHotReload: true`：每 30 秒比较 `index.js` 修改时间，变化后自动热重载（默认关，避免编辑到一半就重载；10 秒防抖）；
+  - `hotReload: false` 可禁用；
+  - 热重载会停掉旧 channel（清定时器/轮询）再加载新模块；客户端 `client.js` 属于浏览器 bundle，热重载后仍需刷新页面。
+- 新自测 `test-hotreload.mjs`（4 项：调用 reconcileProfile、HMR 不可用、开关关闭、/reload 先回执再触发）。
+
+### 变更
+
+- 版本 2.14.0 → 2.15.0（`CHANNEL_VERSION` / `bot_agent` 同步）。
+
+---
+
 ## 2.14.0 — 2026-11-14
 
 ### 新增
