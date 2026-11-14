@@ -37,6 +37,12 @@
         progressIntervalMs: 120000
         # 会话正在跑时，微信消息直接插进当前对话（steer），不再排在这一轮后面等
         insertWhileBusy: true
+        # 表情包：把 png / jpg / gif / webp 放进这个目录（留空 = ~/.dsh/wechat-stickers）
+        stickerDir: ''
+        # 可爱化回复：off / subtle（约一半回复带一个）/ always（每条都带）
+        cuteLevel: subtle
+        # 可爱化回复用的 emoji / 颜文字池
+        cutePool: ['🌊', '🐳', '✨', '😊', '🫧', '🎵', '🌸', '🐱', '🫶', '☕']
         # 跨账号转发：同一会话下，A 号收到的消息也发到 B/C 号的微信
         relayAcrossAccounts: true
         relayPrefix: '[{account}] '

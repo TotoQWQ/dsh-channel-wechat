@@ -6,6 +6,22 @@
 
 ---
 
+## 2.4.11 — 2026-11-14
+
+### 新增
+
+- **`/sticker` 表情包**：从 `stickerDir`（默认 `~/.dsh/wechat-stickers/`，启动时自动建目录并放一份 README）随机发一张 png/jpg/gif/webp；`/sticker 关键词` 按文件名筛选；`/sticker 列表` 列出目录内容；目录为空或无匹配时给放置提示。走已验证的 `getuploadurl → CDN → image_item` 通道（发出来是图片/GIF，不是微信原生表情 item——iLink 协议没有 sticker 类型）。
+- **可爱化回复**：`cuteLevel` 控制助手回复句尾是否自动带一个 emoji/颜文字——`off` 不加、`subtle`（默认）约一半、`always` 每条；`cutePool` 可换池子（默认 10 个），已经以池中元素结尾时不重复加。微信发起的回复与镜像发送的助手消息都生效。
+- 新自测 `test-cute.mjs`（6 项：decorateReply 三档与去重、表情包扫描/筛选/无匹配、`/sticker` 走 CDN 发图、关键词、列表、空目录提示）。
+
+### 变更
+
+- 命令白名单增加 `sticker`；`/help` 同步。
+- 新增配置 `stickerDir`、`cuteLevel`、`cutePool`。
+- 版本 2.4.10 → 2.4.11（`CHANNEL_VERSION` / `bot_agent` 同步）。
+
+---
+
 ## 2.4.10 — 2026-11-14
 
 ### 修复

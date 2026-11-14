@@ -27,6 +27,7 @@
 - **微信里切换会话**：在微信里发 `/sessions` 看最近会话列表，`/use 2` 切到第 2 个，`/new` 开新会话，`/current` 看当前绑定；不在这几个命令里的 `/xxx` 照常发给会话。切换立即生效（不改电脑端任何东西），下一轮就发到新会话。
 - **微信里换模型 / 看状态 / 停任务**：`/models` 列可用模型（标当前/默认、推理档），`/model 2`（或 `/model 2 high`、`/model provider/modelId`）切换会话模型；`/status` 看运行状态、队列与待输入；`/stop` 停掉当前这一轮。
 - **微信里整理会话**：`/rename 标题` 给会话改名；`/history 6` 回看最近几条对话；`/search 关键词` 跨会话搜历史，搜到的序号可直接 `/use` 切过去；`/approval ask|never` 看/切当前会话的审批策略。
+- **卖萌**：`/sticker` 从 `~/.dsh/wechat-stickers/` 随机发一张表情包（`/sticker 关键词` 按文件名筛、`/sticker 列表` 看全部）；`cuteLevel` 控制助手回复句尾是否自动带一个 emoji/颜文字（默认 `subtle`，约一半回复带）。
 - **消息插进正在跑的对话**：会话正在跑时（不管是谁发起的），微信里新来的消息用 `steer` 直接插进**当前这一轮**，在下一个 step 边界被模型看到，不用等这一轮结束；会话空闲时才按普通一轮一答处理。插入会给一次「📥 已插入当前对话」回执（10 秒内多次插入只回一次）。
   - 「在跑」的判断：优先 `sessionController.state` 的真实 `running`，其次 `turn/start`・`turn/end` 跟踪；`turnActive` 只是运行时兜底标记，不写入 `state.json`，重启后按会话真实状态重新判断（避免上次没跑完的轮次被当成一直在跑）。
 - **Agent 工具**：`wechat_login` / `wechat_verify_code` / `wechat_status` / `wechat_bind` / `wechat_unbind` / `wechat_send` / `wechat_send_file` / `wechat_report` / `wechat_logout` / `wechat_simulate` / `wechat_debug`。
@@ -95,6 +96,7 @@ plugin_manager: install_bundle  target=<本目录的绝对路径>
 | `/history 6`（`/hist`） | 看当前会话最近 N 条对话（默认 6，最多 20，每条截断 140 字） |
 | `/search 关键词`（`/find`） | 跨会话搜历史，列出命中的会话与片段，序号可直接 `/use` 切过去 |
 | `/approval`（`/policy`） | 看当前审批策略；`/approval ask` 需要时询问，`/approval never` 需要审批的操作直接拒绝 |
+| `/sticker` | 从表情包目录随机发一张图片/GIF；`/sticker 关键词` 按文件名筛；`/sticker 列表` 看目录内容 |
 | `/models` | 列出可用模型（按厂商分组编号，标出「当前 / 默认」和推理档），并记住这次的序号 |
 | `/model` | 查看当前会话模型与默认模型 |
 | `/model 2` | 切到上次 `/models` 列表的第 2 个模型；`/model 2 high` 同时指定推理档；也可 `/model <provider>/<modelId>` |
@@ -131,6 +133,9 @@ plugin_manager: install_bundle  target=<本目录的绝对路径>
 | `progressHeartbeat` | `true` | 一轮跑得久时在微信里定期报进度（已思考多久） |
 | `progressIntervalMs` | `120000` | 进度提示间隔，最短 30000 |
 | `insertWhileBusy` | `true` | 会话在跑时把微信消息插进当前对话（steer）而不是排队等待 |
+| `stickerDir` | `''` | 表情包目录，空 = `~/.dsh/wechat-stickers` |
+| `cuteLevel` | `subtle` | 回复句尾加 emoji 的强度：`off` / `subtle`（约一半）/ `always` |
+| `cutePool` | 内置 10 个 | 可爱化回复用的 emoji / 颜文字池 |
 | `apiBase` | `https://ilinkai.weixin.qq.com` | iLink 服务地址 |
 
 选项/审批的回复规则：

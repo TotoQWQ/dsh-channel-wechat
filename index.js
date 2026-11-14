@@ -32,8 +32,8 @@ const ILINK_APP_ID = 'bot'
 /** 0x000MMNNPP：与官方 2.4.10 对齐 */
 const ILINK_APP_CLIENT_VERSION = (2 << 16) | (4 << 8) | 10
 /** 插件版本：与 package.json 保持一致，出现在 base_info.channel_version 里 */
-const CHANNEL_VERSION = '2.4.10'
-const BOT_AGENT = 'DSH-WeChat/2.4.10'
+const CHANNEL_VERSION = '2.4.11'
+const BOT_AGENT = 'DSH-WeChat/2.4.11'
 /** 媒体 CDN（官方 getUploadUrl 没返回 upload_full_url 时用它拼上传地址） */
 const CDN_BASE = 'https://novac2c.cdn.weixin.qq.com/c2c'
 
@@ -445,6 +445,7 @@ const WECHAT_COMMANDS = new Set([
   'find',
   'approval',
   'policy',
+  'sticker',
   'help',
   '?',
 ])
@@ -463,6 +464,7 @@ const WECHAT_HELP_TEXT = [
   '/model 2   切换模型（可带推理档：/model 2 high）',
   '/status    会话状态（模型 / 运行 / 队列）',
   '/approval ask|never  审批策略',
+  '/sticker   随机发一张表情包（/sticker 关键词 可筛，/sticker 列表 看目录）',
   '/stop      停止当前这一轮',
   '/help      这条帮助',
   '',
@@ -491,6 +493,70 @@ function parseWechatCommand(text) {
 function sessionDisplayName(item) {
   const title = String(item?.title ?? '').trim()
   return title || String(item?.id ?? '').slice(0, 24)
+}
+
+// ---------------------------------------------------------------------------
+// 可爱化 / 表情包（纯函数：不碰网络，单测直接调用）
+// ---------------------------------------------------------------------------
+
+/** 可爱化回复的默认 emoji 池。 */
+const DEFAULT_CUTE_POOL = ['🌊', '🐳', '✨', '😊', '🫧', '🎵', '🌸', '🐱', '🫶', '☕']
+
+/** 表情包目录里认的图片扩展名。 */
+const STICKER_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp'])
+
+/**
+ * 给回复句尾加一个可爱 emoji/颜文字。
+ * @param {string} text 原始回复
+ * @param {{ level?: string, pool?: string[], random?: () => number }} [options]
+ *        level：off 不加 / subtle 约一半 / always 每条；random 可注入便于测试
+ * @returns {string} 处理后的文本
+ */
+function decorateReply(text, options = {}) {
+  const value = String(text ?? '')
+  const level = options.level ?? 'subtle'
+  const pool = Array.isArray(options.pool) && options.pool.length > 0 ? options.pool : DEFAULT_CUTE_POOL
+  const random = typeof options.random === 'function' ? options.random : Math.random
+  if (!value || level === 'off') return value
+  const trimmed = value.trimEnd()
+  if (pool.some((item) => trimmed.endsWith(item))) return value
+  if (level !== 'always' && random() > 0.5) return value
+  const index = Math.min(pool.length - 1, Math.floor(random() * pool.length))
+  return `${trimmed} ${pool[Math.max(0, index)]}`
+}
+
+/**
+ * 列出一个目录里的表情包文件（png/jpg/jpeg/gif/webp）。
+ * @param {string} dir 目录
+ * @returns {string[]} 绝对路径，按文件名排序
+ */
+function listStickers(dir) {
+  try {
+    return fs
+      .readdirSync(dir)
+      .filter((name) => STICKER_EXTS.has(path.extname(name).toLowerCase()))
+      .map((name) => path.join(dir, name))
+      .sort()
+  } catch {
+    return []
+  }
+}
+
+/**
+ * 按关键词挑一张表情包。
+ * @param {string} dir 目录
+ * @param {string} [keyword] 文件名包含的关键词
+ * @returns {{ stickers: string[], picked: string | null }} 匹配集合与抽中的文件
+ */
+function pickSticker(dir, keyword) {
+  const all = listStickers(dir)
+  if (all.length === 0) return { stickers: [], picked: null }
+  const matched = keyword
+    ? all.filter((file) => path.basename(file).toLowerCase().includes(String(keyword).toLowerCase()))
+    : all
+  if (matched.length === 0) return { stickers: all, picked: null }
+  const index = Math.floor(Math.random() * matched.length)
+  return { stickers: matched, picked: matched[Math.min(index, matched.length - 1)] }
 }
 
 // ---------------------------------------------------------------------------
@@ -540,6 +606,17 @@ function normalizeConfig(raw) {
     // 微信里等不到回复时：skip = 直接跳过（选项卡标未作答 / 审批按拒绝）继续这一轮；
     // handoff = 交还电脑端弹卡（没人守在电脑旁时会一直等）
     optionTimeoutMode: c.optionTimeoutMode === 'handoff' ? 'handoff' : 'skip',
+    // 表情包目录：/sticker 从这里随机发一张图片或 GIF
+    stickerDir:
+      typeof c.stickerDir === 'string' && c.stickerDir.trim()
+        ? c.stickerDir.trim()
+        : path.join(os.homedir(), '.dsh', 'wechat-stickers'),
+    // 可爱化回复：off / subtle（约一半）/ always（每条）
+    cuteLevel: ['off', 'subtle', 'always'].includes(String(c.cuteLevel)) ? String(c.cuteLevel) : 'subtle',
+    cutePool:
+      Array.isArray(c.cutePool) && c.cutePool.length > 0
+        ? c.cutePool.map((item) => String(item)).filter(Boolean).slice(0, 50)
+        : DEFAULT_CUTE_POOL,
     stateDir,
   }
 }
@@ -1958,8 +2035,9 @@ function createChannel(ctx, config) {
       const reply = await waitForReply(sessionId, baseline, signal, timeoutMs)
       binding.lastSeq = currentSeq(sessionId)
       const plain = reply || '（本轮没有产生文本回复）'
-      await sendToBinding(binding, plain)
-      return { sessionId, reply: plain }
+      const decorated = reply ? decorateReply(plain, { level: config.cuteLevel, pool: config.cutePool }) : plain
+      await sendToBinding(binding, decorated)
+      return { sessionId, reply: decorated }
     } finally {
       binding.turnActive = false
       delete binding.turnActiveSince
@@ -2223,6 +2301,45 @@ function createChannel(ctx, config) {
       )
       lines.push(`绑定：${binding.explicit ? '手动绑定' : '自动会话'}`)
       await replyText(binding, lines.join('\n'))
+      return true
+    }
+    if (name === 'sticker') {
+      const args = command.args.trim()
+      if (/^(list|列表)$/i.test(args)) {
+        const files = listStickers(config.stickerDir)
+        if (files.length === 0) {
+          await replyText(binding, `（还没有表情包：把 png / jpg / gif / webp 放进 ${config.stickerDir}，再发 /sticker）`)
+          return true
+        }
+        const names = files.slice(0, 30).map((file) => path.basename(file).replace(/\.[^.]+$/, ''))
+        await replyText(
+          binding,
+          `🖼 表情包 ${files.length} 张：\n${names.join('、')}\n发 /sticker 随机，/sticker 关键词 按文件名筛。`,
+        )
+        return true
+      }
+      const { stickers, picked } = pickSticker(config.stickerDir, args)
+      if (stickers.length === 0) {
+        await replyText(binding, `（还没有表情包：把 png / jpg / gif / webp 放进 ${config.stickerDir}，再发 /sticker）`)
+        return true
+      }
+      if (!picked) {
+        const names = stickers.slice(0, 12).map((file) => path.basename(file).replace(/\.[^.]+$/, ''))
+        await replyText(binding, `没有匹配「${args}」的表情包，现有：\n${names.join('、')}`)
+        return true
+      }
+      try {
+        const target = binding.toUserId || String(binding.chatId).replace(/^user:/, '')
+        await sendMediaToChat({
+          accountId: binding.accountId,
+          toUserId: target,
+          contextToken: binding.contextToken ?? '',
+          filePath: picked,
+        })
+        log('info', 'sticker sent', { key: binding.key, file: path.basename(picked) })
+      } catch (err) {
+        await replyText(binding, `⚠️ 表情包发送失败：${String(err?.message ?? err)}`)
+      }
       return true
     }
     if (name === 'models') {
@@ -2836,7 +2953,7 @@ function createChannel(ctx, config) {
           candidates.push({ seq: Number(event.seq), kind: 'assistant', len: text.length, sample: text.slice(0, 80) })
           if (send) {
             try {
-              await sendToBinding(binding, text)
+              await sendToBinding(binding, decorateReply(text, { level: config.cuteLevel, pool: config.cutePool }))
               sent += 1
             } catch (err) {
               candidates[candidates.length - 1].error = String(err?.message ?? err)
@@ -3178,9 +3295,27 @@ function createChannel(ctx, config) {
 
   // -- 生命周期 ------------------------------------------------------------
 
+  /** 表情包目录不存在就建一个，并放一份说明。 */
+  function ensureStickerDir() {
+    try {
+      fs.mkdirSync(config.stickerDir, { recursive: true })
+      const note = path.join(config.stickerDir, 'README.txt')
+      if (!fs.existsSync(note)) {
+        fs.writeFileSync(
+          note,
+          '把 png / jpg / gif / webp 表情包放在这个目录。\n微信里发 /sticker 随机发一张，/sticker 关键词 按文件名筛，/sticker 列表 看全部。\n',
+          'utf8',
+        )
+      }
+    } catch (err) {
+      log('warn', 'sticker dir unavailable', { dir: config.stickerDir, error: String(err?.message ?? err) })
+    }
+  }
+
   function start() {
     loadState()
     loadQuotes()
+    ensureStickerDir()
     for (const account of accounts()) startMonitor(account.id)
     startMirror()
     startProgress()
@@ -3779,6 +3914,9 @@ export const __test = {
   formatDuration,
   parseWechatCommand,
   sessionDisplayName,
+  decorateReply,
+  listStickers,
+  pickSticker,
   normalizeConfig,
   createChannel,
 }
