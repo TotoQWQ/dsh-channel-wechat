@@ -93,6 +93,21 @@
         suggestCooldownMs: 60000
         # GitHub API 地址（测试/企业版可改）
         githubApiBase: https://api.github.com
+        # 风险消息邮件预警（只通知宿主，不拦截消息）；需要先配 SMTP 与收件人
+        riskAlert: false
+        # 风险规则（name/pattern）；留空用内置：赌博 / 诈骗刷单 / 色情 / 引流外链
+        riskPatterns: []
+        # 收件人 / 发件人
+        riskEmailTo: ''
+        riskEmailFrom: ''
+        # 同一聊天预警冷却（毫秒）
+        riskCooldownMs: 300000
+        # SMTP（465 隐式 TLS；587 自动 STARTTLS）
+        riskSmtpHost: ''
+        riskSmtpPort: 465
+        riskSmtpSecure: true
+        riskSmtpUser: ''
+        riskSmtpPass: ''
         # 跨账号转发：同一会话下，A 号收到的消息也发到 B/C 号的微信
         relayAcrossAccounts: true
         relayPrefix: '[{account}] '

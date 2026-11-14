@@ -17,8 +17,10 @@
 
 import crypto from 'node:crypto'
 import fs from 'node:fs'
+import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
+import tls from 'node:tls'
 import zlib from 'node:zlib'
 
 import qrcode from './vendor/qrcode.mjs'
@@ -32,8 +34,8 @@ const ILINK_APP_ID = 'bot'
 /** 0x000MMNNPP：与官方 2.4.10 对齐 */
 const ILINK_APP_CLIENT_VERSION = (2 << 16) | (4 << 8) | 10
 /** 插件版本：与 package.json 保持一致，出现在 base_info.channel_version 里 */
-const CHANNEL_VERSION = '2.12.0'
-const BOT_AGENT = 'DSH-WeChat/2.12.0'
+const CHANNEL_VERSION = '2.13.0'
+const BOT_AGENT = 'DSH-WeChat/2.13.0'
 /** 媒体 CDN（官方 getUploadUrl 没返回 upload_full_url 时用它拼上传地址） */
 const CDN_BASE = 'https://novac2c.cdn.weixin.qq.com/c2c'
 
@@ -542,6 +544,7 @@ const WECHAT_COMMANDS = new Set([
   'health',
   'resend',
   'suggest',
+  'risk',
   'help',
   '?',
 ])
@@ -565,6 +568,7 @@ const WECHAT_HELP_TEXT = [
   '/ping      检查微信连接是否正常（轮询 / 错误 / 镜像 / 待补发）',
   '/resend    立刻补发队列里没发出去的回复',
   '/suggest <内容>  把你的需求提交成 GitHub issue',
+  '/risk      风险消息邮件预警状态（/risk test 发测试邮件）',
   '/stop      停止当前这一轮',
   '/help      这条帮助',
   '',
@@ -702,6 +706,208 @@ function evaluateAccountHealth(account, running, now, staleMs) {
 function isDeliveryError(message) {
   return /^sendmessage\b/.test(String(message ?? ''))
 }
+
+/** 默认的风险消息规则（可在配置 riskPatterns 里覆盖）。 */
+const RISK_DEFAULT_PATTERNS = [
+  { name: '赌博', pattern: '赌博|博彩|下注|押注|赌场|六合彩|时时彩' },
+  { name: '诈骗刷单', pattern: '刷单|返利|兼职日结|代开发票|洗钱|跑分|贷款秒批' },
+  { name: '色情', pattern: '裸聊|约炮|色情|成人视频' },
+  { name: '引流外链', pattern: '加微信|加V|加vx|私聊我|扫码|二维码|点击链接|https?://' },
+]
+
+/**
+ * 判断一条消息是否命中风险规则。
+ * @param {string} text 消息文本
+ * @param {{ name: string, pattern: string }[]} [patterns] 规则表
+ * @returns {{ name: string, matched: string }[]} 命中项（空数组表示安全）
+ */
+function detectRisk(text, patterns = RISK_DEFAULT_PATTERNS) {
+  const value = String(text ?? '')
+  if (!value.trim()) return []
+  const hits = []
+  for (const rule of patterns) {
+    if (!rule?.pattern) continue
+    try {
+      const match = value.match(new RegExp(rule.pattern, 'i'))
+      if (match) hits.push({ name: String(rule.name ?? rule.pattern), matched: String(match[0]) })
+    } catch {
+      /* 配置里的正则写错了就跳过这条规则 */
+    }
+  }
+  return hits
+}
+
+// ---------------------------------------------------------------------------
+// 极简 SMTP（无依赖）：用于风险预警邮件
+// ---------------------------------------------------------------------------
+
+/**
+ * 在 socket 上按行读 SMTP 响应（支持多行 `250-…`）。
+ * @param {import('node:net').Socket} socket 连接
+ * @returns {{ read: () => Promise<string>, readResponse: () => Promise<string>, detach: () => void }}
+ */
+function attachSmtpReader(socket) {
+  let buffer = ''
+  const lines = []
+  let pending = null
+  let errorHandler = null
+  const onData = (chunk) => {
+    buffer += chunk.toString('utf8')
+    let index
+    while ((index = buffer.indexOf('\r\n')) >= 0) {
+      const line = buffer.slice(0, index)
+      buffer = buffer.slice(index + 2)
+      if (pending) {
+        const waiter = pending
+        pending = null
+        waiter.resolve(line)
+      } else {
+        lines.push(line)
+      }
+    }
+  }
+  socket.on('data', onData)
+  const read = () =>
+    new Promise((resolve, reject) => {
+      if (lines.length > 0) return resolve(lines.shift())
+      pending = { resolve, reject }
+      if (!errorHandler) {
+        errorHandler = (err) => {
+          if (pending) {
+            const waiter = pending
+            pending = null
+            waiter.reject(err)
+          }
+        }
+        socket.once('error', errorHandler)
+      }
+    })
+  return {
+    read,
+    readResponse: async () => {
+      while (true) {
+        const line = await read()
+        // 多行响应的续行是 `250-`，最后一行是 `250 `
+        if (/^\d{3} /.test(line)) return line
+      }
+    },
+    detach: () => {
+      socket.removeListener('data', onData)
+      if (errorHandler) socket.removeListener('error', errorHandler)
+      errorHandler = null
+    },
+  }
+}
+
+/**
+ * 发送一封纯文本邮件（SMTP，支持 465 隐式 TLS 与 587 STARTTLS）。
+ * @param {{ host: string, port: number, secure: boolean, starttls?: boolean, user?: string, pass?: string, from: string, to: string, subject: string, body: string, timeoutMs?: number }} options 参数
+ * @returns {Promise<void>}
+ */
+function smtpSendMail(options) {
+  const timeoutMs = Math.max(3000, Number(options.timeoutMs) || 20_000)
+  const host = String(options.host ?? '')
+  const port = Number(options.port) || (options.secure ? 465 : 25)
+  const from = String(options.from ?? '')
+  const to = String(options.to ?? '')
+  if (!host || !from || !to) return Promise.reject(new Error('SMTP 参数不完整（host/from/to）'))
+  return new Promise((resolve, reject) => {
+    let socket = options.secure
+      ? tls.connect({ host, port, servername: host })
+      : net.connect({ host, port })
+    let settled = false
+    const finish = (err) => {
+      if (settled) return
+      settled = true
+      try {
+        socket.destroy()
+      } catch {
+        /* ignore */
+      }
+      if (err) reject(err)
+      else resolve()
+    }
+    socket.setTimeout(timeoutMs, () => finish(new Error('SMTP 超时')))
+    socket.once('error', (err) => finish(err))
+    const onReady = async () => {
+      try {
+        let reader = attachSmtpReader(socket)
+        let greeting = await reader.readResponse()
+        if (!/^220/.test(greeting)) throw new Error(`SMTP 问候失败：${greeting}`)
+        const ehlo = async () => {
+          socket.write(`EHLO dsh-channel-wechat\r\n`)
+          return reader.readResponse()
+        }
+        let capabilities = await ehlo()
+        if (!options.secure && options.starttls !== false && /STARTTLS/i.test(capabilities)) {
+          socket.write('STARTTLS\r\n')
+          const resp = await reader.readResponse()
+          if (!/^220/.test(resp)) throw new Error(`STARTTLS 失败：${resp}`)
+          reader.detach()
+          const secured = tls.connect({ socket, servername: host })
+          await new Promise((res, rej) => {
+            secured.once('secureConnect', res)
+            secured.once('error', rej)
+          })
+          socket = secured
+          reader = attachSmtpReader(socket)
+          socket.once('error', (err) => finish(err))
+          capabilities = await ehlo()
+        }
+        void capabilities
+        if (options.user) {
+          socket.write('AUTH LOGIN\r\n')
+          const auth1 = await reader.readResponse()
+          if (!/^334/.test(auth1)) throw new Error(`AUTH 失败：${auth1}`)
+          socket.write(`${Buffer.from(options.user, 'utf8').toString('base64')}\r\n`)
+          const auth2 = await reader.readResponse()
+          if (!/^334/.test(auth2)) throw new Error(`AUTH 用户失败：${auth2}`)
+          socket.write(`${Buffer.from(options.pass ?? '', 'utf8').toString('base64')}\r\n`)
+          const auth3 = await reader.readResponse()
+          if (!/^235/.test(auth3)) throw new Error(`AUTH 密码失败：${auth3}`)
+        }
+        socket.write(`MAIL FROM:<${from}>\r\n`)
+        const mail = await reader.readResponse()
+        if (!/^250/.test(mail)) throw new Error(`MAIL FROM 失败：${mail}`)
+        socket.write(`RCPT TO:<${to}>\r\n`)
+        const rcpt = await reader.readResponse()
+        if (!/^250/.test(rcpt)) throw new Error(`RCPT TO 失败：${rcpt}`)
+        socket.write('DATA\r\n')
+        const data = await reader.readResponse()
+        if (!/^354/.test(data)) throw new Error(`DATA 失败：${data}`)
+        const subject = `=?UTF-8?B?${Buffer.from(options.subject, 'utf8').toString('base64')}?=`
+        const encoded = Buffer.from(options.body, 'utf8').toString('base64')
+        const chunks = encoded.match(/.{1,76}/g) ?? []
+        const headers = [
+          `From: <${from}>`,
+          `To: <${to}>`,
+          `Subject: ${subject}`,
+          `Date: ${new Date().toUTCString()}`,
+          'MIME-Version: 1.0',
+          'Content-Type: text/plain; charset=UTF-8',
+          'Content-Transfer-Encoding: base64',
+          '',
+          ...chunks,
+          '.',
+          '',
+        ]
+        socket.write(headers.join('\r\n'))
+        const queued = await reader.readResponse()
+        if (!/^250/.test(queued)) throw new Error(`DATA 提交失败：${queued}`)
+        socket.write('QUIT\r\n')
+        await reader.readResponse().catch(() => '')
+        finish()
+      } catch (err) {
+        finish(err)
+      }
+    }
+    if (options.secure) socket.once('secureConnect', onReady)
+    else socket.once('connect', onReady)
+  })
+}
+
+/**
+ * 是否为「投递失败」之外的噪声提示（旧版失败通知）。
 
 /** 旧版本会把自己生成的「处理失败」提示也塞进补发队列，恢复时要跳过这些噪声。 */
 function isNoisePending(text) {
@@ -948,6 +1154,33 @@ function normalizeConfig(raw) {
       typeof c.githubApiBase === 'string' && c.githubApiBase.trim()
         ? c.githubApiBase.trim().replace(/\/+$/, '')
         : 'https://api.github.com',
+    // 风险消息 → 邮件预警（只通知宿主，不拦截、不改变消息处理）
+    riskAlert: c.riskAlert === true,
+    riskPatterns:
+      Array.isArray(c.riskPatterns) && c.riskPatterns.length > 0
+        ? c.riskPatterns
+            .map((rule) =>
+              typeof rule === 'string'
+                ? { name: '自定义', pattern: String(rule) }
+                : { name: String(rule?.name ?? '自定义'), pattern: String(rule?.pattern ?? '') },
+            )
+            .filter((rule) => rule.pattern)
+            .slice(0, 30)
+        : RISK_DEFAULT_PATTERNS,
+    riskEmailTo: typeof c.riskEmailTo === 'string' ? c.riskEmailTo.trim() : '',
+    riskEmailFrom: typeof c.riskEmailFrom === 'string' ? c.riskEmailFrom.trim() : '',
+    riskCooldownMs:
+      Number.isFinite(c.riskCooldownMs) && c.riskCooldownMs >= 60_000
+        ? Math.min(3600_000, Math.floor(c.riskCooldownMs))
+        : 300_000,
+    riskSmtpHost: typeof c.riskSmtpHost === 'string' ? c.riskSmtpHost.trim() : '',
+    riskSmtpPort:
+      Number.isFinite(c.riskSmtpPort) && c.riskSmtpPort > 0 && c.riskSmtpPort < 65536
+        ? Math.floor(c.riskSmtpPort)
+        : 465,
+    riskSmtpSecure: c.riskSmtpSecure !== false,
+    riskSmtpUser: typeof c.riskSmtpUser === 'string' ? c.riskSmtpUser.trim() : '',
+    riskSmtpPass: typeof c.riskSmtpPass === 'string' ? String(c.riskSmtpPass) : '',
     stateDir,
   }
 }
@@ -3176,6 +3409,62 @@ function createChannel(ctx, config) {
     return { ok: true, url: String(json?.html_url ?? ''), number: Number(json?.number ?? 0) }
   }
 
+  // -- 风险消息：命中规则时给宿主发邮件（不拦截消息） -----------------------
+
+  const riskLastAt = new Map()
+  const riskSent = []
+
+  function riskConfigured() {
+    return Boolean(config.riskEmailTo && config.riskSmtpHost)
+  }
+
+  /**
+   * 发一封风险预警邮件（只通知宿主，不改变消息处理）。
+   * @param {object} binding 绑定
+   * @param {string} text 消息文本
+   * @param {{ name: string, matched: string }[]} hits 命中规则
+   * @returns {Promise<{ ok: boolean, reason?: string }>}
+   */
+  async function sendRiskAlert(binding, text, hits) {
+    if (!riskConfigured()) return { ok: false, reason: 'not-configured' }
+    const now = Date.now()
+    const last = Number(riskLastAt.get(binding.key) ?? 0)
+    if (now - last < config.riskCooldownMs) return { ok: false, reason: 'cooldown' }
+    riskLastAt.set(binding.key, now)
+    const ruleNames = [...new Set(hits.map((hit) => hit.name))].join('、')
+    const matched = [...new Set(hits.map((hit) => hit.matched))].join('、')
+    const subject = `[DSH 微信风险] ${ruleNames} · ${String(binding.chatId).slice(-16)}`
+    const body = [
+      'DSH 微信通道检测到高风险消息（未拦截、照常处理，仅通知宿主）。',
+      '',
+      `时间：${new Date().toISOString()}`,
+      `账号：${binding.accountId}`,
+      `聊天：${binding.chatId}`,
+      `规则：${ruleNames}`,
+      `命中：${matched}`,
+      '',
+      '消息内容：',
+      String(text).slice(0, 2000),
+      '',
+      `插件版本：${CHANNEL_VERSION}`,
+    ].join('\n')
+    await smtpSendMail({
+      host: config.riskSmtpHost,
+      port: config.riskSmtpPort,
+      secure: config.riskSmtpSecure,
+      user: config.riskSmtpUser,
+      pass: config.riskSmtpPass,
+      from: config.riskEmailFrom || config.riskSmtpUser || 'dsh-channel-wechat@localhost',
+      to: config.riskEmailTo,
+      subject,
+      body,
+    })
+    riskSent.push({ at: now, key: binding.key, rules: ruleNames })
+    if (riskSent.length > 50) riskSent.shift()
+    log('warn', 'risk alert email sent', { key: binding.key, rules: ruleNames })
+    return { ok: true }
+  }
+
   async function replyText(binding, text) {
     try {
       await sendToBinding(binding, text)
@@ -3497,6 +3786,36 @@ function createChannel(ctx, config) {
       suggestLastAt.set(binding.key, Date.now())
       const result = await createSuggestion(binding, content)
       await replyText(binding, result.ok ? `✅ 建议已提交：${result.url}` : `⚠️ 提交失败：${result.message}`)
+      return true
+    }
+    if (name === 'risk') {
+      const sub = command.args.trim().toLowerCase()
+      if (sub === 'test') {
+        if (!riskConfigured()) {
+          await replyText(binding, '⚠️ 还没配置风险邮件（riskSmtpHost / riskEmailTo）。')
+          return true
+        }
+        riskLastAt.delete(binding.key)
+        try {
+          const hits = detectRisk('测试：赌博 加微信', config.riskPatterns)
+          await sendRiskAlert(binding, '这是一封测试邮件（/risk test）', hits.length > 0 ? hits : [{ name: '测试', matched: '测试' }])
+          await replyText(binding, `✅ 测试邮件已发送到 ${config.riskEmailTo}`)
+        } catch (err) {
+          await replyText(binding, `⚠️ 测试邮件失败：${String(err?.message ?? err)}`)
+        }
+        return true
+      }
+      await replyText(
+        binding,
+        [
+          '🛡 风险消息预警',
+          `开关：${config.riskAlert ? '开' : '关（riskAlert: false）'}`,
+          `邮件：${riskConfigured() ? config.riskEmailTo : '未配置（riskSmtpHost / riskEmailTo）'}`,
+          `规则：${config.riskPatterns.length} 条 · 冷却 ${Math.round(config.riskCooldownMs / 1000)} 秒`,
+          `本次启动已发：${riskSent.length} 封`,
+          '用法：/risk test 发测试邮件；改配置请编辑插件配置',
+        ].join('\n'),
+      )
       return true
     }
     if (name === 'stop') {
@@ -4128,6 +4447,20 @@ function createChannel(ctx, config) {
       log('info', 'wechat command', { accountId, chatId, command: command.name })
       await handleSessionCommand(binding, command)
       return { command: command.name }
+    }
+
+    // 风险消息：只给宿主发邮件预警，消息本身照常处理（不拦截、不改写）
+    if (config.riskAlert) {
+      try {
+        const hits = detectRisk(text, config.riskPatterns)
+        if (hits.length > 0) {
+          void sendRiskAlert(binding, text, hits).catch((err) =>
+            log('warn', 'risk alert failed', { key: binding.key, error: String(err?.message ?? err) }),
+          )
+        }
+      } catch (err) {
+        log('warn', 'risk scan failed', { key: binding.key, error: String(err?.message ?? err) })
+      }
     }
 
     // 记下这条入站原文供后续「引用」回查；用干净摘要（不带本地媒体路径）
@@ -5246,6 +5579,7 @@ export const __test = {
   summarizeThinkingDelta,
   evaluateAccountHealth,
   isDeliveryError,
+  detectRisk,
   segmentText,
   splitByLength,
   decorateReply,
