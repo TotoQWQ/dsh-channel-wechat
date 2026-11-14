@@ -32,8 +32,8 @@ const ILINK_APP_ID = 'bot'
 /** 0x000MMNNPP：与官方 2.4.10 对齐 */
 const ILINK_APP_CLIENT_VERSION = (2 << 16) | (4 << 8) | 10
 /** 插件版本：与 package.json 保持一致，出现在 base_info.channel_version 里 */
-const CHANNEL_VERSION = '2.4.9'
-const BOT_AGENT = 'DSH-WeChat/2.4.9'
+const CHANNEL_VERSION = '2.4.10'
+const BOT_AGENT = 'DSH-WeChat/2.4.10'
 /** 媒体 CDN（官方 getUploadUrl 没返回 upload_full_url 时用它拼上传地址） */
 const CDN_BASE = 'https://novac2c.cdn.weixin.qq.com/c2c'
 
@@ -609,6 +609,15 @@ function createChannel(ctx, config) {
 
   // -- 状态持久化 ----------------------------------------------------------
 
+  /** 运行时标记（turnActive 等）不跨进程：加载时一律复位，避免重启后误判「会话在跑」。 */
+  function normalizeBindingRuntimeFlags() {
+    for (const binding of Object.values(state.bindings)) {
+      if (!binding || typeof binding !== 'object') continue
+      binding.turnActive = false
+      delete binding.turnActiveSince
+    }
+  }
+
   function loadState() {
     let parsed = null
     try {
@@ -627,6 +636,7 @@ function createChannel(ctx, config) {
             ? { defaultSessionId: String(parsed.settings.defaultSessionId ?? '') }
             : { defaultSessionId: '' },
       }
+      normalizeBindingRuntimeFlags()
       return
     }
     // v1 → v2 迁移：单账号 + 每聊天独立会话
@@ -668,6 +678,7 @@ function createChannel(ctx, config) {
         bindings,
         settings: { defaultSessionId: String(parsed.settings?.defaultSessionId ?? '') },
       }
+      normalizeBindingRuntimeFlags()
       log('info', 'migrated v1 state to v2', { accountId: id, bindings: Object.keys(bindings).length })
       saveState(true)
     }
@@ -678,7 +689,18 @@ function createChannel(ctx, config) {
       saveTimer = null
       try {
         fs.mkdirSync(config.stateDir, { recursive: true })
-        fs.writeFileSync(stateFile, JSON.stringify(state, null, 2), { encoding: 'utf8', mode: 0o600 })
+        // turnActive 这类运行时标记不写入磁盘：进程重启后它们只会变成假状态
+        const serializable = {
+          ...state,
+          bindings: Object.fromEntries(
+            Object.entries(state.bindings).map(([key, binding]) => {
+              if (!binding || typeof binding !== 'object') return [key, binding]
+              const { turnActive, turnActiveSince, ...rest } = binding
+              return [key, rest]
+            }),
+          ),
+        }
+        fs.writeFileSync(stateFile, JSON.stringify(serializable, null, 2), { encoding: 'utf8', mode: 0o600 })
       } catch (err) {
         log('error', 'saveState failed', { error: String(err) })
       }
@@ -1930,6 +1952,7 @@ function createChannel(ctx, config) {
     const baseline = currentSeq(sessionId)
     const framed = config.messagePrefix ? `${config.messagePrefix}${text}` : text
     binding.turnActive = true
+    binding.turnActiveSince = Date.now()
     try {
       await promptSession(sessionId, framed, signal)
       const reply = await waitForReply(sessionId, baseline, signal, timeoutMs)
@@ -1939,6 +1962,7 @@ function createChannel(ctx, config) {
       return { sessionId, reply: plain }
     } finally {
       binding.turnActive = false
+      delete binding.turnActiveSince
       binding.lastInboundAt = Date.now()
       saveState()
     }
@@ -2301,10 +2325,11 @@ function createChannel(ctx, config) {
       }
       const current = currentModelOf(binding.sessionId)
       const pending = Array.isArray(state?.pendingInput) ? state.pendingInput : []
+      const busy = state ? state.running === true : await isSessionBusy(binding.sessionId)
       const lines = ['📊 会话状态']
       lines.push(row ? `${sessionDisplayName(row)} · ${shortSessionId(row.id)}` : `${binding.sessionId}（不在会话列表里）`)
       lines.push(
-        `在线：${session ? '是' : '否'} · 运行中：${state ? (state.running ? '是' : '否') : isSessionBusy(binding.sessionId) ? '是' : '否'}`,
+        `在线：${session ? '是' : '否'} · 运行中：${busy ? '是' : '否'}`,
       )
       lines.push(current ? `模型：${current.provider} / ${current.model}` : '模型：读不到（会话未打开）')
       if (state) {
@@ -2324,7 +2349,7 @@ function createChannel(ctx, config) {
         await replyText(binding, '⚠️ 这个 DSH 版本不支持停止。')
         return true
       }
-      if (!isSessionBusy(binding.sessionId)) {
+      if (!(await isSessionBusy(binding.sessionId))) {
         await replyText(binding, '没有在跑的轮次，不用停。')
         return true
       }
@@ -2493,7 +2518,7 @@ function createChannel(ctx, config) {
       return true
     }
     if (name === 'new') {
-      if (binding.turnActive) {
+      if (await isSessionBusy(binding.sessionId)) {
         await replyText(binding, '⏳ 这一轮还在回复，等结束再 /new。')
         return true
       }
@@ -2502,7 +2527,7 @@ function createChannel(ctx, config) {
       return true
     }
     if (name === 'use' || name === 'switch') {
-      if (binding.turnActive) {
+      if (await isSessionBusy(binding.sessionId)) {
         await replyText(binding, '⏳ 这一轮还在回复，等结束再切换。')
         return true
       }
@@ -2568,10 +2593,53 @@ function createChannel(ctx, config) {
    * @param {string} sessionId 会话 id
    * @returns {boolean} true 表示正在跑
    */
-  function isSessionBusy(sessionId) {
+  /** 清掉某个会话身上残留的「正在跑」标记（重启/异常遗留）。 */
+  function clearTurnFlags(sessionId) {
+    for (const binding of Object.values(state.bindings)) {
+      if (binding?.sessionId === sessionId && binding.turnActive) {
+        binding.turnActive = false
+        delete binding.turnActiveSince
+      }
+    }
+  }
+
+  /**
+   * 这个会话现在是不是有一轮在跑（能插话的那种）。
+   * 依据：turn/start・turn/end 跟踪优先，其次问一次 sessionController.state（重启后也能
+   * 认出 GUI 已经在跑的轮次），binding.turnActive 只在时间窗内作为兜底。
+   * @param {string} sessionId 会话 id
+   * @returns {Promise<boolean>} true 表示正在跑
+   */
+  async function isSessionBusy(sessionId) {
     if (!sessionId) return false
-    if (activeTurns.has(String(sessionId))) return true
-    return Object.values(state.bindings).some((item) => item.sessionId === sessionId && item.turnActive)
+    const id = String(sessionId)
+    if (activeTurns.has(id)) return true
+    const session = ctx.get('sessions')?.get?.(id)
+    if (!session) return false
+    const controller = ctx.get('sessionController')
+    let running
+    if (controller?.state) {
+      try {
+        running = (await controller.state({ sessionId: id }, new AbortController().signal))?.running
+      } catch {
+        running = undefined
+      }
+    }
+    if (running === true) return true
+    const flagged = Object.values(state.bindings).find((item) => item.sessionId === id && item.turnActive)
+    if (!flagged) return false
+    const since = Number(flagged.turnActiveSince ?? 0)
+    const age = since > 0 ? Date.now() - since : Number.POSITIVE_INFINITY
+    if (age > config.replyTimeoutMs + 300_000) {
+      clearTurnFlags(id)
+      return false
+    }
+    // 状态明确空闲、且标记已经放了几秒（不是刚开轮的竞态窗口）才作废
+    if (running === false && age > 5000) {
+      clearTurnFlags(id)
+      return false
+    }
+    return true
   }
 
   /**
@@ -2695,7 +2763,7 @@ function createChannel(ctx, config) {
     const signal = monitors.get(accountId)?.abort?.signal ?? new AbortController().signal
 
     // 会话正在跑：把这条消息直接插进当前对话（steer），不再排在这一轮后面等
-    if (config.insertWhileBusy && isSessionBusy(binding.sessionId)) {
+    if (config.insertWhileBusy && (await isSessionBusy(binding.sessionId))) {
       const framed = config.messagePrefix ? `${config.messagePrefix}${text}` : text
       try {
         await promptSession(binding.sessionId, framed, signal, 'steer')
@@ -3147,6 +3215,7 @@ function createChannel(ctx, config) {
     handleInbound,
     observeSessionEvent,
     progressTick,
+    isSessionBusy,
     waitingOptions: () => optionWaits.size,
     handleHttp,
     sendToChat,

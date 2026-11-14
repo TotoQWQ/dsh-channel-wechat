@@ -6,6 +6,27 @@
 
 ---
 
+## 2.4.10 — 2026-11-14
+
+### 修复
+
+- **重启后微信不再返回消息**：`turnActive`（「这一轮正在回复」的运行时标记）曾被写进 `state.json`。如果进程在回复中途退出，重启后它会被原样加载、永远不会变回 false，于是插件一直以为会话在跑：
+  - 新消息全被当成「插入当前对话」steer 掉，不会再起一轮，也就没有回复；
+  - 镜像循环因为 `turnActive` 而整段跳过，助手消息也不发微信；
+  - `/new`、`/use` 还会回「这一轮还在回复」。
+- 修复方式：
+  1. `loadState()` 时把 `turnActive` / `turnActiveSince` 一律复位；
+  2. `saveState()` 不再把这些运行时标记写盘；
+  3. `isSessionBusy()` 改成异步，并先用 `sessionController.state` 查会话真实 `running`，`turnActive` 只作兜底，且超过 `replyTimeoutMs + 5 分钟` 的标记直接作废；
+  4. `runTurn` 写入 `turnActiveSince` 时间戳，便于判断标记年龄。
+- 新增 `test-busy.mjs`（5 项）：加载复位、假忙走正常排队、真忙仍 steer、超龄标记作废、turn/start・turn/end 跟踪。
+
+### 变更
+
+- 版本 2.4.9 → 2.4.10（`CHANNEL_VERSION` / `bot_agent` 同步）。
+
+---
+
 ## 2.4.9 — 2026-11-14
 
 ### 变更

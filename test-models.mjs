@@ -87,7 +87,13 @@ const liveSession = {
   requestContext: () => ({ provider: 'deepseek', model: 'deepseek-chat' }),
   requestHeader: () => undefined,
 }
-const sessionState = { running: true, active: true, queue: [{ id: 'q1' }, { id: 'q2' }], pendingInput: ['question'] }
+let running = true
+const sessionState = () => ({
+  running,
+  active: running,
+  queue: [{ id: 'q1' }, { id: 'q2' }],
+  pendingInput: ['question'],
+})
 const ctx = {
   get: (name) => {
     if (name === 'sessions') {
@@ -101,12 +107,12 @@ const ctx = {
           const { sessionId: _ignored, ...selection } = request
           return { selected: selection }
         },
-        state: async () => sessionState,
+        state: async () => sessionState(),
         cancel: (request) => {
           cancels.push(request)
           return { accepted: true }
         },
-        list: async () => ({ items: [{ sessionId, updatedAt: 1, running: true, cwd: 'C:\\work', projections: { values: { title: '模型会话' } } }] }),
+        list: async () => ({ items: [{ sessionId, updatedAt: 1, running, cwd: 'C:\\work', projections: { values: { title: '模型会话' } } }] }),
         prompt: async () => {},
       }
     }
@@ -205,11 +211,13 @@ try {
   })
 
   await check('/stop 仅在运行中可停', async () => {
+    running = false
     reset()
     await inbound('/stop', 'm-9')
     assert.match(lastReply(), /没有在跑的轮次/)
     assert.equal(cancels.length, 0)
 
+    running = true
     channel.observeSessionEvent(liveSession, { type: 'turn/start' })
     reset()
     await inbound('/stop', 'm-10')
@@ -219,7 +227,8 @@ try {
   })
 } finally {
   channel.stop()
-  await new Promise((resolve) => server.close(resolve))
+  server.closeAllConnections?.()
+  server.close()
   fs.rmSync(stateDir, { recursive: true, force: true })
 }
 
