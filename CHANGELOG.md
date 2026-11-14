@@ -6,6 +6,19 @@
 
 ---
 
+## 2.20.3 — 2026-11-15
+
+### 修复
+
+- 表情识别 `maxTokens` 从 12 提到 **1024**：deepseek-flash 是推理模型，12 个 token 全被 reasoning 用光，finish 为 `max-tokens`、正文为空，导致分类总是 null。
+- `/wechat-channel/classify` 支持 `maxTokens` 与 `effort` 查询参数，便于调试推理档。
+
+### 变更
+
+- 版本 2.20.2 → 2.20.3。
+
+---
+
 ## 2.20.2 — 2026-11-15
 
 ### 诊断

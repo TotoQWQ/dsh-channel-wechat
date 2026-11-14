@@ -37,8 +37,8 @@ const ILINK_APP_ID = 'bot'
 /** 0x000MMNNPP：与官方 2.4.10 对齐 */
 const ILINK_APP_CLIENT_VERSION = (2 << 16) | (4 << 8) | 10
 /** 插件版本：与 package.json 保持一致，出现在 base_info.channel_version 里 */
-const CHANNEL_VERSION = '2.20.2'
-const BOT_AGENT = 'DSH-WeChat/2.20.2'
+const CHANNEL_VERSION = '2.20.3'
+const BOT_AGENT = 'DSH-WeChat/2.20.3'
 /** 媒体 CDN（官方 getUploadUrl 没返回 upload_full_url 时用它拼上传地址） */
 const CDN_BASE = 'https://novac2c.cdn.weixin.qq.com/c2c'
 
@@ -3098,8 +3098,11 @@ function createChannel(ctx, config) {
    * @param {string} ext 扩展名（含点）
    * @returns {Promise<string | null>} 分类名，未识别返回 null
    */
-  async function classifyEmotionBuffer(buffer, ext) {
+  async function classifyEmotionBuffer(buffer, ext, options = {}) {
     if (!config.emotionAutoClassify) return null
+    const maxTokens = Number.isFinite(options.maxTokens)
+      ? Math.max(32, Math.min(4096, Math.floor(options.maxTokens)))
+      : 1024
     const llm = ctx.get('llm')
     const attachments = ctx.get('attachments')
     const selection = ctx.get('agentDefaultModel')?.currentSelection?.()
@@ -3128,7 +3131,7 @@ function createChannel(ctx, config) {
       const text = []
       let finishChunk = null
       try {
-        const stream = llm.stream({
+        const streamOptions = {
           provider: selection.provider,
           model: selection.model,
           messages: [
@@ -3143,10 +3146,14 @@ function createChannel(ctx, config) {
               ],
             },
           ],
-          maxTokens: 12,
+          maxTokens,
           temperature: 0,
           signal: controller.signal,
-        })
+        }
+        if (typeof options.reasoningEffort === 'string' && options.reasoningEffort) {
+          streamOptions.reasoningEffort = options.reasoningEffort
+        }
+        const stream = llm.stream(streamOptions)
         for await (const chunk of stream) {
           if (chunk?.type === 'text-delta' && typeof chunk.text === 'string') text.push(chunk.text)
           if (chunk?.type === 'finish') {
@@ -5421,7 +5428,10 @@ function createChannel(ctx, config) {
         } catch (err) {
           return json(res, { error: String(err?.message ?? err) }, 400)
         }
-        const category = await classifyEmotionBuffer(buffer, path.extname(filePath) || '.png')
+        const category = await classifyEmotionBuffer(buffer, path.extname(filePath) || '.png', {
+          maxTokens: Number(url.searchParams.get('maxTokens') ?? NaN),
+          reasoningEffort: url.searchParams.get('effort') || undefined,
+        })
         return json(res, { ok: true, filePath, category })
       }
       if (method === 'GET' && route === 'mirror-probe') {
