@@ -6,6 +6,20 @@
 
 ---
 
+## 2.5.0 — 2026-11-14
+
+### 新增
+
+- **面板 token 消耗统计**：绑定表新增「消耗」列，显示该微信会话绑定 DSH 会话的 token 总量 / 今日 / 上一轮；数据来自会话事件里 `assistant/message` 的 `usage`，按 `throughSeq` 增量累计，重启后重新扫描当前会话。
+- **`/status` 增加用量行**：`用量：1.2 万 token（今日 3.4k，上轮 560）`，方便在微信里直接看。
+- 新自测 `test-usage.mjs`（5 项：token 短写、usage 累计、增量不重复、snapshot 带 usage、/status 显示）。
+
+### 变更
+
+- 版本 2.4.11 → 2.5.0（`CHANNEL_VERSION` / `bot_agent` 同步）。
+
+---
+
 ## 2.4.11 — 2026-11-14
 
 ### 新增

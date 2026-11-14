@@ -12,7 +12,7 @@ const accountId = 'acct-test'
 const chatId = 'user:u-test@im.wechat'
 const sessionId = 'session-test-1'
 const bindingKey = `${accountId}::${chatId}`
-const step = 100 // 进度间隔（毫秒），测试用
+const step = 250 // 进度间隔（毫秒），测试用
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 const sent = []
@@ -146,7 +146,8 @@ try {
   })
 } finally {
   channel.stop()
-  await new Promise((resolve) => server.close(resolve))
+  server.closeAllConnections?.()
+  server.close()
   fs.rmSync(stateDir, { recursive: true, force: true })
 }
 

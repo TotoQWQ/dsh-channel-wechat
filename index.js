@@ -32,8 +32,8 @@ const ILINK_APP_ID = 'bot'
 /** 0x000MMNNPP：与官方 2.4.10 对齐 */
 const ILINK_APP_CLIENT_VERSION = (2 << 16) | (4 << 8) | 10
 /** 插件版本：与 package.json 保持一致，出现在 base_info.channel_version 里 */
-const CHANNEL_VERSION = '2.4.11'
-const BOT_AGENT = 'DSH-WeChat/2.4.11'
+const CHANNEL_VERSION = '2.5.0'
+const BOT_AGENT = 'DSH-WeChat/2.5.0'
 /** 媒体 CDN（官方 getUploadUrl 没返回 upload_full_url 时用它拼上传地址） */
 const CDN_BASE = 'https://novac2c.cdn.weixin.qq.com/c2c'
 
@@ -493,6 +493,19 @@ function parseWechatCommand(text) {
 function sessionDisplayName(item) {
   const title = String(item?.title ?? '').trim()
   return title || String(item?.id ?? '').slice(0, 24)
+}
+
+/**
+ * token 数的中文短写（面板/微信里用）。
+ * @param {number} value token 数
+ * @returns {string} 如 950 / 3.2k / 1.5 万 / 2.0 亿
+ */
+function formatTokens(value) {
+  const number = Number(value) || 0
+  if (number >= 100_000_000) return `${(number / 100_000_000).toFixed(1)} 亿`
+  if (number >= 10_000) return `${(number / 10_000).toFixed(1)} 万`
+  if (number >= 1_000) return `${(number / 1_000).toFixed(1)}k`
+  return String(Math.round(number))
 }
 
 // ---------------------------------------------------------------------------
@@ -2209,7 +2222,62 @@ function createChannel(ctx, config) {
     return optionWaits.get(bindingKeyOf(accountId, chatId))
   }
 
-  // -- 会话切换命令：/sessions /use /new /current /help --------------------
+  // -- 消耗统计：每个微信会话的 token 用量（增量扫描会话事件） -------------
+
+  /** sessionId → { throughSeq, totalTokens, inputTokens, outputTokens, days, lastTurnTokens } */
+  const usageStats = new Map()
+
+  /**
+   * 累计一个会话的 token 用量：只扫上次之后新增的 assistant/message 事件。
+   * @param {string} sessionId 会话 id
+   * @returns {{ totalTokens: number, inputTokens: number, outputTokens: number, todayTokens: number, lastTurnTokens: number } | null}
+   */
+  function usageOf(sessionId) {
+    if (!sessionId) return null
+    const session = ctx.get('sessions')?.get?.(sessionId)
+    if (!session) return null
+    let entry = usageStats.get(sessionId)
+    if (!entry) {
+      entry = { throughSeq: 0, totalTokens: 0, inputTokens: 0, outputTokens: 0, days: {}, lastTurnTokens: 0 }
+      usageStats.set(sessionId, entry)
+    }
+    const end = Number(session.seq ?? 0)
+    if (Number.isFinite(end) && end > entry.throughSeq) {
+      let events = []
+      try {
+        events = session.snapshotEvents(entry.throughSeq, end) ?? []
+      } catch {
+        events = []
+      }
+      for (const event of events) {
+        if (event?.type !== 'assistant/message') continue
+        const usage = event.data?.usage
+        if (!usage) continue
+        const total = Number(
+          usage.totalTokens ?? Number(usage.inputTokens ?? 0) + Number(usage.outputTokens ?? 0),
+        )
+        if (!Number.isFinite(total) || total <= 0) continue
+        entry.totalTokens += total
+        entry.inputTokens += Number(usage.inputTokens ?? 0) || 0
+        entry.outputTokens += Number(usage.outputTokens ?? 0) || 0
+        entry.lastTurnTokens = total
+        const day = new Date(Number(event.time ?? Date.now())).toLocaleDateString('sv-SE')
+        entry.days[day] = (entry.days[day] ?? 0) + total
+      }
+      entry.throughSeq = end
+      const keys = Object.keys(entry.days).sort()
+      while (keys.length > 90) delete entry.days[keys.shift()]
+    }
+    const today = new Date().toLocaleDateString('sv-SE')
+    return {
+      totalTokens: entry.totalTokens,
+      inputTokens: entry.inputTokens,
+      outputTokens: entry.outputTokens,
+      todayTokens: entry.days[today] ?? 0,
+      lastTurnTokens: entry.lastTurnTokens,
+      throughSeq: entry.throughSeq,
+    }
+  }
 
   async function replyText(binding, text) {
     try {
@@ -2449,6 +2517,12 @@ function createChannel(ctx, config) {
         `在线：${session ? '是' : '否'} · 运行中：${busy ? '是' : '否'}`,
       )
       lines.push(current ? `模型：${current.provider} / ${current.model}` : '模型：读不到（会话未打开）')
+      const usage = usageOf(binding.sessionId)
+      if (usage) {
+        lines.push(
+          `用量：${formatTokens(usage.totalTokens)} token（今日 ${formatTokens(usage.todayTokens)}，上轮 ${formatTokens(usage.lastTurnTokens)}）`,
+        )
+      }
       if (state) {
         lines.push(
           `队列：${Array.isArray(state.queue) ? state.queue.length : 0} 条${pending.length ? ` · 待输入：${pending.join(' / ')}` : ''}`,
@@ -3106,6 +3180,8 @@ function createChannel(ctx, config) {
         needsActivation: /prepare failed/i.test(String(binding.lastError ?? '')),
         lastInboundAt: binding.lastInboundAt ? new Date(binding.lastInboundAt).toISOString() : null,
         lastOutboundAt: binding.lastOutboundAt ? new Date(binding.lastOutboundAt).toISOString() : null,
+        // 该微信会话绑定的 DSH 会话的 token 消耗（面板/宿主用）
+        usage: usageOf(binding.sessionId),
       })),
       mirror: { running: Boolean(mirrorTimer), intervalMs: config.mirrorIntervalMs },
       settings: { defaultSessionId: state.settings?.defaultSessionId || '' },
@@ -3351,6 +3427,7 @@ function createChannel(ctx, config) {
     observeSessionEvent,
     progressTick,
     isSessionBusy,
+    usageOf,
     waitingOptions: () => optionWaits.size,
     handleHttp,
     sendToChat,
@@ -3914,6 +3991,7 @@ export const __test = {
   formatDuration,
   parseWechatCommand,
   sessionDisplayName,
+  formatTokens,
   decorateReply,
   listStickers,
   pickSticker,

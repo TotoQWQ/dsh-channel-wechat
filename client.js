@@ -272,6 +272,14 @@ window.__ModuleLoader__.load({
         return `${title} · ${item.id.slice(-8)}`
       }
 
+      const formatTokens = (value) => {
+        const number = Number(value) || 0
+        if (number >= 100_000_000) return `${(number / 100_000_000).toFixed(1)} 亿`
+        if (number >= 10_000) return `${(number / 10_000).toFixed(1)} 万`
+        if (number >= 1_000) return `${(number / 1_000).toFixed(1)}k`
+        return String(Math.round(number))
+      }
+
       return h(
         'div',
         { style: styles.root },
@@ -529,6 +537,7 @@ window.__ModuleLoader__.load({
                     h('th', { style: styles.th }, '账号'),
                     h('th', { style: styles.th }, 'DSH 会话'),
                     h('th', { style: styles.th }, '最近'),
+                    h('th', { style: styles.th }, '消耗'),
                     h('th', { style: styles.th }, ''),
                   ),
                 ),
@@ -590,6 +599,22 @@ window.__ModuleLoader__.load({
                               '需微信侧激活：让对方给机器人发一条消息',
                             )
                           : null,
+                      ),
+                      h(
+                        'td',
+                        { style: styles.td },
+                        binding.usage
+                          ? h(
+                              'div',
+                              { style: { fontSize: 12, whiteSpace: 'nowrap' } },
+                              `${formatTokens(binding.usage.totalTokens)} 总`,
+                              h(
+                                'div',
+                                { style: { ...styles.muted, fontSize: 11 } },
+                                `今日 ${formatTokens(binding.usage.todayTokens)} · 上轮 ${formatTokens(binding.usage.lastTurnTokens)}`,
+                              ),
+                            )
+                          : h('span', { style: styles.muted }, '—'),
                       ),
                       h(
                         'td',
