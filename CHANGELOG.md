@@ -6,6 +6,23 @@
 
 ---
 
+## 2.14.0 — 2026-11-14
+
+### 新增
+
+- **自动化任务完成反馈**（第一轮第 3 项）：
+  - 定时任务（Host `schedule` 服务）投递到已绑定微信的会话后，`turn/end` 时给绑定的微信发 `⏰ 定时任务完成：「标题」· 用时 X`；
+  - 通过任务 `lastDelivery.targetSessionId` 与 `deliveredAt` 落在该轮开始前后 `automationWindowMs`（默认 2 分钟）内来判断，避免把普通对话误判成定时任务；
+  - 微信发起的轮次不重复通知（结果本来就会回微信）；`automationReport: false` 可关；
+  - `/tasks`（`/schedule`）查看定时任务列表（标题、状态、目标会话、下次时间）。
+- 新自测 `test-automation.mjs`（6 项：完成通知、旧投递不误报、直接判断、关闭开关、/tasks 列表、schedule 不可用）。
+
+### 变更
+
+- 版本 2.13.0 → 2.14.0（`CHANNEL_VERSION` / `bot_agent` 同步）。
+
+---
+
 ## 2.13.0 — 2026-11-14
 
 ### 新增

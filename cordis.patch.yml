@@ -108,6 +108,10 @@
         riskSmtpSecure: true
         riskSmtpUser: ''
         riskSmtpPass: ''
+        # 自动化任务完成反馈：定时任务跑完给绑定的微信发一条完成通知
+        automationReport: true
+        # 判断「这一轮是定时任务触发」的时间窗口（毫秒）
+        automationWindowMs: 120000
         # 跨账号转发：同一会话下，A 号收到的消息也发到 B/C 号的微信
         relayAcrossAccounts: true
         relayPrefix: '[{account}] '

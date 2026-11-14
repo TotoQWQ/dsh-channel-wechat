@@ -1,6 +1,6 @@
 # 微信 ClawBot（iLink）通道 · DeepSeek Harness 插件
 
-**中文** | [English](./README.en.md) · 版本 **2.13.0** · [更新日志](./CHANGELOG.md)
+**中文** | [English](./README.en.md) · 版本 **2.14.0** · [更新日志](./CHANGELOG.md)
 
 把 **DeepSeek Harness 的会话**和**微信（官方 ClawBot「龙虾」插件）**双向接起来：
 微信里发消息 → 变成 DSH 会话里的用户消息；DSH 会话里的回复 → 发回微信。
@@ -36,6 +36,7 @@
 - **流式分段**：微信这一轮进行中时，按正文增量**边生成边发**——只在遇到空行（段落结束）且该段 ≥ `streamMinChars`（默认 200 字）时发送，两次至少间隔 `streamMinIntervalMs`（默认 1.5s）；最终回复会自动扣掉已发前缀，只补发剩余部分，不会重复；`streamSegment: false` 可关。
 - **建议入口**：微信里 `/suggest <内容>` 直接把需求提交成 GitHub issue（标题取首行、正文带聊天/账号/版本信息），成功后回复 issue 链接；同一聊天有冷却（`suggestCooldownMs`），token 支持插件配置 `suggestToken` 或环境变量 `GH_TOKEN` / `GITHUB_TOKEN`，可配 `suggestRepo` / `suggestLabels`。
 - **风险消息邮件预警**（可选，默认关）：`riskAlert: true` 后，入站文本命中规则（内置赌博 / 诈骗刷单 / 色情 / 引流外链，可用 `riskPatterns` 覆盖）时，用 SMTP 给宿主发一封邮件（含时间、账号、聊天、命中的规则与原文片段），**消息照常转发、不拦截不改写**；同一聊天有 `riskCooldownMs` 冷却（默认 5 分钟）。`/risk` 查看状态，`/risk test` 发测试邮件。
+- **自动化任务反馈**：定时任务（`schedule` 服务）投递到已绑定微信的会话后，这一轮结束时会往微信发一条 `⏰ 定时任务完成：「标题」· 用时 X`；通过任务的 `lastDelivery` 与 `turn/start` 时间窗口判断（默认前后 2 分钟），`automationReport: false` 可关。`/tasks`（`/schedule`）可直接查看当前定时任务列表。
 - **投递恢复**：发送失败（如 iLink `ret=-2 prepare failed`）的回复自动进补发队列（保留 `pendingTtlMs`，默认 6 小时），任一新消息带回 `context_token` 后**先自动补发**再处理新消息；`/resend` 可手动补发；连续 `sendBreakerThreshold` 次失败后熔断 `sendBreakerMs`（默认 5 分钟）不再撞接口；进度心跳失败会退避 2 分钟、不再刷屏；同一进程同一 stateDir 只保留一个活跃实例（防热重载泄漏出多个轮询/定时器）。
 - **消息插进正在跑的对话**：会话正在跑时（不管是谁发起的），微信里新来的消息用 `steer` 直接插进**当前这一轮**，在下一个 step 边界被模型看到，不用等这一轮结束；会话空闲时才按普通一轮一答处理。插入会给一次「📥 已插入当前对话」回执（10 秒内多次插入只回一次）。
   - 「在跑」的判断：优先 `sessionController.state` 的真实 `running`，其次 `turn/start`・`turn/end` 跟踪；`turnActive` 只是运行时兜底标记，不写入 `state.json`，重启后按会话真实状态重新判断（避免上次没跑完的轮次被当成一直在跑）。
@@ -111,6 +112,7 @@ plugin_manager: install_bundle  target=<本目录的绝对路径>
 | `/resend` | 立刻补发队列里没发出去的回复（发送失败自动入队，最多保留 6 小时） |
 | `/suggest <内容>` | 把需求提交成 GitHub issue，成功后回复链接 |
 | `/risk`（`/risk test`） | 查看风险邮件预警状态 / 发测试邮件 |
+| `/tasks`（`/schedule`） | 查看定时任务列表（完成后自动通知绑定微信） |
 | `/models` | 列出可用模型（按厂商分组编号，标出「当前 / 默认」和推理档），并记住这次的序号 |
 | `/model` | 查看当前会话模型与默认模型 |
 | `/model 2` | 切到上次 `/models` 列表的第 2 个模型；`/model 2 high` 同时指定推理档；也可 `/model <provider>/<modelId>` |
@@ -182,6 +184,8 @@ plugin_manager: install_bundle  target=<本目录的绝对路径>
 | `riskSmtpHost` / `riskSmtpPort` | `''` / `465` | SMTP 服务器与端口（587 自动 STARTTLS） |
 | `riskSmtpSecure` | `true` | 465 隐式 TLS；587 可设 false 走 STARTTLS |
 | `riskSmtpUser` / `riskSmtpPass` | `''` | SMTP 账号（AUTH LOGIN） |
+| `automationReport` | `true` | 定时任务完成时给绑定微信发通知 |
+| `automationWindowMs` | `120000` | 判断「这一轮由定时任务触发」的时间窗口 |
 | `apiBase` | `https://ilinkai.weixin.qq.com` | iLink 服务地址 |
 
 选项/审批的回复规则：

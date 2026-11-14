@@ -34,8 +34,8 @@ const ILINK_APP_ID = 'bot'
 /** 0x000MMNNPP：与官方 2.4.10 对齐 */
 const ILINK_APP_CLIENT_VERSION = (2 << 16) | (4 << 8) | 10
 /** 插件版本：与 package.json 保持一致，出现在 base_info.channel_version 里 */
-const CHANNEL_VERSION = '2.13.0'
-const BOT_AGENT = 'DSH-WeChat/2.13.0'
+const CHANNEL_VERSION = '2.14.0'
+const BOT_AGENT = 'DSH-WeChat/2.14.0'
 /** 媒体 CDN（官方 getUploadUrl 没返回 upload_full_url 时用它拼上传地址） */
 const CDN_BASE = 'https://novac2c.cdn.weixin.qq.com/c2c'
 
@@ -545,6 +545,8 @@ const WECHAT_COMMANDS = new Set([
   'resend',
   'suggest',
   'risk',
+  'tasks',
+  'schedule',
   'help',
   '?',
 ])
@@ -569,6 +571,7 @@ const WECHAT_HELP_TEXT = [
   '/resend    立刻补发队列里没发出去的回复',
   '/suggest <内容>  把你的需求提交成 GitHub issue',
   '/risk      风险消息邮件预警状态（/risk test 发测试邮件）',
+  '/tasks     查看定时任务（/tasks 别名 /schedule）',
   '/stop      停止当前这一轮',
   '/help      这条帮助',
   '',
@@ -1181,6 +1184,12 @@ function normalizeConfig(raw) {
     riskSmtpSecure: c.riskSmtpSecure !== false,
     riskSmtpUser: typeof c.riskSmtpUser === 'string' ? c.riskSmtpUser.trim() : '',
     riskSmtpPass: typeof c.riskSmtpPass === 'string' ? String(c.riskSmtpPass) : '',
+    // 自动化（定时任务）完成反馈：跑完给绑定的微信发一条完成通知
+    automationReport: c.automationReport !== false,
+    automationWindowMs:
+      Number.isFinite(c.automationWindowMs) && c.automationWindowMs >= 60_000
+        ? Math.min(3600_000, Math.floor(c.automationWindowMs))
+        : 120_000,
     stateDir,
   }
 }
@@ -3465,6 +3474,63 @@ function createChannel(ctx, config) {
     return { ok: true }
   }
 
+  // -- 自动化任务完成反馈：定时任务跑完给绑定的微信发一条完成通知 -----------
+
+  const automationTurns = new Map()
+
+  async function scheduleCatalog() {
+    const schedule = ctx.get('schedule')
+    if (!schedule?.catalog) return null
+    try {
+      return await schedule.catalog()
+    } catch (err) {
+      log('warn', 'schedule catalog failed', { error: String(err?.message ?? err) })
+      return null
+    }
+  }
+
+  /**
+   * 判断这个会话刚结束的 turn 是否由定时任务触发。
+   * 依据：任务最近一次投递的 targetSessionId 与 deliveredAt 落在该 turn 开始前后。
+   * @param {string} sessionId 会话 id
+   * @param {number} [turnStartedAt] turn 开始时间
+   * @returns {Promise<object | null>} 命中的任务
+   */
+  async function detectAutomationTurn(sessionId, turnStartedAt = Date.now()) {
+    const catalog = await scheduleCatalog()
+    if (!catalog) return null
+    for (const task of catalog) {
+      const delivery = task?.lastDelivery
+      if (!delivery || String(delivery.targetSessionId) !== String(sessionId)) continue
+      const at = Date.parse(String(delivery.deliveredAt ?? ''))
+      if (!Number.isFinite(at)) continue
+      if (Math.abs(at - Number(turnStartedAt)) <= config.automationWindowMs) return task
+    }
+    return null
+  }
+
+  /** 给绑定的微信发「定时任务完成」通知。 */
+  async function notifyAutomationDone(sessionId, task, durationMs) {
+    const targets = optionTargets(sessionId)
+    if (targets.length === 0) return 0
+    const title = String(task?.title ?? '未命名任务')
+    const text = `⏰ 定时任务完成：「${title}」· 用时 ${formatDuration(durationMs)}`
+    let sent = 0
+    for (const binding of targets) {
+      const ok = await sendProgressMessage(binding, text)
+      if (ok) sent += 1
+    }
+    if (sent > 0) log('info', 'automation done reported', { sessionId, title, sent })
+    return sent
+  }
+
+  async function finalizeAutomationTurn(sessionId, startedAt) {
+    if (!config.automationReport) return 0
+    const task = await detectAutomationTurn(sessionId, startedAt)
+    if (!task) return 0
+    return notifyAutomationDone(sessionId, task, Date.now() - (startedAt ?? Date.now()))
+  }
+
   async function replyText(binding, text) {
     try {
       await sendToBinding(binding, text)
@@ -3816,6 +3882,32 @@ function createChannel(ctx, config) {
           '用法：/risk test 发测试邮件；改配置请编辑插件配置',
         ].join('\n'),
       )
+      return true
+    }
+    if (name === 'tasks' || name === 'schedule') {
+      const catalog = await scheduleCatalog()
+      if (catalog === null) {
+        await replyText(binding, '⚠️ 定时任务服务不可用（schedule service 未加载）。')
+        return true
+      }
+      if (catalog.length === 0) {
+        await replyText(binding, '当前没有定时任务。')
+        return true
+      }
+      const lines = [`⏰ 定时任务（${catalog.length}）`]
+      for (const task of catalog.slice(0, 10)) {
+        const target =
+          task?.target?.kind === 'session'
+            ? `会话 ${String(task.target.sessionId).slice(-8)}`
+            : task?.target?.kind === 'new_once'
+              ? '一次性新会话'
+              : '每次新会话'
+        const next = task?.scheduledAt ? ` · 下次 ${String(task.scheduledAt).replace('T', ' ').slice(0, 16)}` : ''
+        lines.push(`- ${task?.title || '未命名'}（${task?.status ?? '?'}）· ${target}${next}`)
+      }
+      if (catalog.length > 10) lines.push(`… 还有 ${catalog.length - 10} 个`)
+      lines.push('（定时任务完成时会自动给绑定的微信发一条完成通知）')
+      await replyText(binding, lines.join('\n'))
       return true
     }
     if (name === 'stop') {
@@ -4261,11 +4353,18 @@ function createChannel(ctx, config) {
       return
     }
     if (type === 'turn/end') {
+      const turn = activeTurns.get(sessionId)
       activeTurns.delete(sessionId)
       thinking.delete(sessionId)
       // 微信这一轮还在等 waitForReply 收尾：缓冲留给 runTurn 去扣剩余，不能在这里清掉，
       // 否则最终回复会把已经流式发过的段落再发一遍。
       if (!wechatTurns.has(sessionId)) streamBuffers.delete(sessionId)
+      // 定时任务触发的轮次结束：给绑定的微信发一条完成通知（微信轮次自己会回结果，不重复）
+      if (!wechatTurns.has(sessionId)) {
+        void finalizeAutomationTurn(sessionId, turn?.startedAt).catch((err) =>
+          log('warn', 'automation report failed', { sessionId, error: String(err?.message ?? err) }),
+        )
+      }
     }
   }
 
@@ -4974,6 +5073,10 @@ function createChannel(ctx, config) {
     healthSummary,
     healthTick,
     staleAccountIds,
+    scheduleCatalog,
+    detectAutomationTurn,
+    notifyAutomationDone,
+    finalizeAutomationTurn,
     progressTick,
     flushPending,
     running: () => Boolean(progressTimer || mirrorTimer || healthTimer),
