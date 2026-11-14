@@ -52,6 +52,8 @@
         emotionAuto: subtle
         # subtle 档需要的语境分数（用户命中 2 分、助手命中 1 分）
         emotionThreshold: 2
+        # 没有命中关键词时随机发表情的概率（0–100；明确要表情时不受此限制）
+        emotionRandomChance: 30
         # 同一聊天自动发表情的冷却（毫秒）
         emotionCooldownMs: 300000
         # 是否允许外来来源表情包（插件内置等）；默认 false，只发用户自己收录的

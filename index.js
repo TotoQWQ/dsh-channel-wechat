@@ -37,8 +37,8 @@ const ILINK_APP_ID = 'bot'
 /** 0x000MMNNPP：与官方 2.4.10 对齐 */
 const ILINK_APP_CLIENT_VERSION = (2 << 16) | (4 << 8) | 10
 /** 插件版本：与 package.json 保持一致，出现在 base_info.channel_version 里 */
-const CHANNEL_VERSION = '2.21.0'
-const BOT_AGENT = 'DSH-WeChat/2.21.0'
+const CHANNEL_VERSION = '2.22.0'
+const BOT_AGENT = 'DSH-WeChat/2.22.0'
 /** 媒体 CDN（官方 getUploadUrl 没返回 upload_full_url 时用它拼上传地址） */
 const CDN_BASE = 'https://novac2c.cdn.weixin.qq.com/c2c'
 
@@ -1061,6 +1061,11 @@ function normalizeConfig(raw) {
     emotionAutoClassify: c.emotionAutoClassify !== false,
     // 自动表情：off 不发 / subtle 语境够强才发 / always 命中就发
     emotionAuto: ['off', 'subtle', 'always'].includes(String(c.emotionAuto)) ? String(c.emotionAuto) : 'subtle',
+    // 没有命中关键词时，按这个概率随机发一张（用户明确要表情时不受此概率限制）
+    emotionRandomChance:
+      Number.isFinite(c.emotionRandomChance) && c.emotionRandomChance >= 0
+        ? Math.min(100, Math.floor(c.emotionRandomChance))
+        : 30,
     // subtle 档需要的语境分数（用户命中 2 分、助手命中 1 分）
     emotionThreshold:
       Number.isFinite(c.emotionThreshold) && c.emotionThreshold >= 1
@@ -3388,21 +3393,37 @@ function createChannel(ctx, config) {
     if (config.emotionAuto === 'off') return { sent: 0, reason: 'disabled' }
     const binding = state.bindings[chatKey]
     if (!binding) return { sent: 0, reason: 'no-binding' }
+    const text = String(userText ?? '')
+    // 用户明确要表情/表情包/二次元图：当作强触发，并且不受冷却拦截
+    const wantsMeme = /(发|来|整|要|看|给).{0,8}(表情|表情包|二次元)|表情包|二次元/.test(text)
     const now = Date.now()
-    if (binding.emotionLastAt && now - Number(binding.emotionLastAt) < config.emotionCooldownMs) {
+    if (!wantsMeme && binding.emotionLastAt && now - Number(binding.emotionLastAt) < config.emotionCooldownMs) {
       return { sent: 0, reason: 'cooldown' }
     }
-    const context = emotionContextScore(userText, replyText)
-    if (!context) return { sent: 0, reason: 'no-context' }
+    const allowOther = allowOtherEmotionSource()
+    const pools = EMOTION_CATEGORIES.map((category) => ({
+      category,
+      entries: listEmotionEntries(category, allowOther),
+    })).filter((item) => item.entries.length > 0)
+    if (pools.length === 0) return { sent: 0, reason: 'empty' }
+    const context = emotionContextScore(text, replyText)
     const threshold = config.emotionAuto === 'always' ? 1 : config.emotionThreshold
-    if (context.score < threshold) return { sent: 0, reason: 'weak-context' }
-    const result = await sendEmotionStickers(binding, context.category, 2)
+    let category = null
+    if (context && context.score >= threshold) {
+      const matched = pools.find((item) => item.category === context.category)
+      if (matched) category = matched.category
+    }
+    if (!category && (wantsMeme || Math.random() * 100 < config.emotionRandomChance)) {
+      category = pools[Math.floor(Math.random() * pools.length)].category
+    }
+    if (!category) return { sent: 0, reason: context ? 'weak-context' : 'no-context' }
+    const result = await sendEmotionStickers(binding, category, 2)
     if (result.sent > 0) {
       binding.emotionLastAt = now
       saveState()
-      log('info', 'emotion sent', { key: chatKey, category: context.category, files: result.files })
+      log('info', 'emotion sent', { key: chatKey, category, files: result.files, requested: wantsMeme })
     }
-    return { ...result, score: context.score }
+    return { ...result, score: context?.score ?? 0, requested: wantsMeme }
   }
 
   /** 表情包分类计数（面板/诊断用）。 */
@@ -5488,6 +5509,25 @@ function createChannel(ctx, config) {
         }
         const selection = ctx.get('agentDefaultModel')?.currentSelection?.() ?? null
         return json(res, { selection, providers: out })
+      }
+      if (method === 'POST' && route === 'emotion-import') {
+        const body = await readJsonBody(req)
+        const filePath = String(body?.path ?? '')
+        if (!filePath) return json(res, { error: '缺 path' }, 400)
+        let buffer
+        try {
+          buffer = fs.readFileSync(filePath)
+        } catch (err) {
+          return json(res, { error: String(err?.message ?? err) }, 400)
+        }
+        const ext = path.extname(filePath) || '.png'
+        const category = (await classifyEmotionBuffer(buffer, ext)) ?? (body?.category ?? '其他')
+        const entry = saveEmotionBuffer(buffer, ext, {
+          category,
+          source: 'user',
+          name: body?.name || path.basename(filePath),
+        })
+        return json(res, { ok: true, entry })
       }
       if (method === 'GET' && route === 'classify') {
         const filePath = url.searchParams.get('path') || ''

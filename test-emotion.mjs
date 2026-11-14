@@ -276,6 +276,13 @@ try {
     assert.equal(second.reason, 'cooldown')
   })
 
+  await check('用户明确要表情时绕过冷却并发送', async () => {
+    reset()
+    const result = await channel.maybeSendEmotions(bindingKey, '给我发点表情，我要二次元', '好')
+    assert.ok(result.sent >= 1, JSON.stringify(result))
+    assert.equal(result.requested, true)
+  })
+
   await check('emotion off 时完全不发', async () => {
     const quiet = createChannel(ctx, { ...config, emotionAuto: 'off' })
     quiet.start()

@@ -29,7 +29,7 @@
 - **微信里换模型 / 看状态 / 停任务**：`/models` 列可用模型（标当前/默认、推理档），`/model 2`（或 `/model 2 high`、`/model provider/modelId`）切换会话模型；`/status` 看运行状态、队列与待输入；`/stop` 停掉当前这一轮。
 - **微信里整理会话**：`/rename 标题` 给会话改名；`/history 6` 回看最近几条对话；`/search 关键词` 跨会话搜历史，搜到的序号可直接 `/use` 切过去；`/approval ask|never` 看/切当前会话的审批策略。
 - **卖萌**：`cuteLevel` 控制助手回复句尾是否自动带一个 emoji/颜文字（默认 `subtle`，约一半回复带）；旧版 `/sticker` 与 `~/.dsh/wechat-stickers` 已废弃，统一用 `/emotion`。
-- **表情包库 `/emotion`**：独立目录 `~/.dsh/wechat-emotions/`，按 **25 个细分分类**（开心/大笑/得意/害羞/爱你/亲亲/抱抱/感谢/庆祝/加油/冲鸭/摸鱼/困/难过/委屈/哭/生气/发火/无语/尴尬/惊讶/震惊/害怕/安慰/其他）存放图片与 GIF，带索引、重命名和备注；`/emotion add [分类]` 开始收录、接着发图，**DSH 会让默认模型亲自看图识别分类**（`emotionAutoClassify`，失败才用 add 时指定的分类兜底）、`/emotion end` 结束；`/emotion note 名字 备注` 会把备注拼进文件名；`/emotion other source true|false` 控制是否允许外来来源（默认 false）；发送前按语境做**本地关键词打分**（用户命中 2 分、助手回复命中 1 分），够分才发、每次最多 2 张、带冷却——自动发送本身不耗 token。保存前会校验图片魔数（PNG/JPEG/GIF/WebP，单张 ≤20MB）并按内容 **SHA-256 去重**，重复上传直接跳过；`/emotion dedupe` 可清理历史重复副本。启动时会把旧 `wechat-stickers` 里的图片一次性迁到「其他」（原目录保留）。
+- **表情包库 `/emotion`**：独立目录 `~/.dsh/wechat-emotions/`，按 **25 个细分分类**（开心/大笑/得意/害羞/爱你/亲亲/抱抱/感谢/庆祝/加油/冲鸭/摸鱼/困/难过/委屈/哭/生气/发火/无语/尴尬/惊讶/震惊/害怕/安慰/其他）存放图片与 GIF，带索引、重命名和备注；`/emotion add [分类]` 开始收录、接着发图，**DSH 会让默认模型亲自看图识别分类**（`emotionAutoClassify`，失败才用 add 时指定的分类兜底）、`/emotion end` 结束；`/emotion note 名字 备注` 会把备注拼进文件名；`/emotion other source true|false` 控制是否允许外来来源（默认 false）；发送前按语境做**本地关键词打分**（用户命中 2 分、助手回复命中 1 分），够分才发、每次最多 2 张、带冷却；没有命中关键词时按 `emotionRandomChance`（默认 30%）随机发一张，用户明确说「发表情/要二次元表情」时必定发且不受冷却限制——自动发送本身不耗 token。保存前会校验图片魔数（PNG/JPEG/GIF/WebP，单张 ≤20MB）并按内容 **SHA-256 去重**，重复上传直接跳过；`/emotion dedupe` 可清理历史重复副本。启动时会把旧 `wechat-stickers` 里的图片一次性迁到「其他」（原目录保留）。
 - **思考片段摘要**（默认关，面板可开）：模型边想边把推理增量压成一句「💭 思考中：…」发到微信（本地截取、去代码块、按句号/上限截断，**不调模型不耗 token**）；同一会话默认 30 秒最多一条，`turn/end` 清空缓冲。
 - **断联检测**：`/ping`（或 `/health`）在微信里直接查连接：每个账号是否在轮询、最近一次成功轮询多久前、最近错误、镜像与绑定数；snapshot 增加 `health` 供面板显示「连接正常/异常」。后台每 30 秒检查一次，长轮询超过 `healthStaleMs`（默认 120 秒）没成功就自动重启该账号的 monitor（记录 `staleRestarts`），不用手动重扫码；`healthCheck: false` 可关自动重启。
 - **分段发送**（微信不支持流式，只能整段分条发）：长回复按空行段落切分、能合并的段合并、超长段再按句号/长度切，默认每条不超过 `segmentMaxChars`（0 = 用 `maxReplyChars`），相邻条之间隔 `segmentDelayMs`（默认 500ms）；可选 `segmentIndex: true` 加「（1/3）」序号；`segmentMode: length` 可回到旧的纯长度切分。
@@ -159,6 +159,7 @@ plugin_manager: install_bundle  target=<本目录的绝对路径>
 | `emotionAutoClassify` | `true` | 上传表情包后由默认模型看图识别分类（会消耗少量 token） |
 | `emotionAuto` | `subtle` | 自动表情：`off` / `subtle`（语境够强）/ `always`（命中就发） |
 | `emotionThreshold` | `2` | `subtle` 档的语境分数门槛（用户命中 2 分、助手命中 1 分） |
+| `emotionRandomChance` | `30` | 没命中关键词时随机发表情的概率（0–100；明确要表情时必定发） |
 | `emotionCooldownMs` | `300000` | 同一聊天自动发表情的冷却 |
 | `emotionAllowOtherSource` | `false` | 是否允许外来来源表情包（内置等）；`/emotion other source true` 可临时开 |
 | `thinkingSummary` | `false` | 思考时把推理增量压成短摘要发微信（面板可开） |
