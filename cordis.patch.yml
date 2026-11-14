@@ -32,6 +32,8 @@
         # 进度提示：一轮跑得久时，每隔一段时间在微信里报一次「已经思考多久」
         progressHeartbeat: true
         progressIntervalMs: 120000
+        # 会话正在跑时，微信消息直接插进当前对话（steer），不再排在这一轮后面等
+        insertWhileBusy: true
         # 跨账号转发：同一会话下，A 号收到的消息也发到 B/C 号的微信
         relayAcrossAccounts: true
         relayPrefix: '[{account}] '

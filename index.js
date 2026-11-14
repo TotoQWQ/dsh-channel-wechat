@@ -32,8 +32,8 @@ const ILINK_APP_ID = 'bot'
 /** 0x000MMNNPP：与官方 2.4.10 对齐 */
 const ILINK_APP_CLIENT_VERSION = (2 << 16) | (4 << 8) | 10
 /** 插件版本：与 package.json 保持一致，出现在 base_info.channel_version 里 */
-const CHANNEL_VERSION = '2.4.5'
-const BOT_AGENT = 'DSH-WeChat/2.4.5'
+const CHANNEL_VERSION = '2.4.6'
+const BOT_AGENT = 'DSH-WeChat/2.4.6'
 /** 媒体 CDN（官方 getUploadUrl 没返回 upload_full_url 时用它拼上传地址） */
 const CDN_BASE = 'https://novac2c.cdn.weixin.qq.com/c2c'
 
@@ -504,6 +504,8 @@ function normalizeConfig(raw) {
       Number.isFinite(c.progressIntervalMs) && c.progressIntervalMs >= 30_000
         ? c.progressIntervalMs
         : 120_000,
+    // 微信消息插入正在跑的对话（steer），而不是排在当前这一轮后面等
+    insertWhileBusy: c.insertWhileBusy !== false,
     stateDir,
   }
 }
@@ -1346,10 +1348,10 @@ function createChannel(ctx, config) {
     return typeof seq === 'number' ? seq : 0
   }
 
-  async function promptSession(sessionId, text, signal) {
+  async function promptSession(sessionId, text, signal, mode = 'queue') {
     const controller = requireService('sessionController')
     await controller.prompt(
-      { requestId: uid('wx-req'), sessionId, mode: 'queue', content: [{ type: 'text', text }] },
+      { requestId: uid('wx-req'), sessionId, mode, content: [{ type: 'text', text }] },
       signal,
     )
   }
@@ -2191,6 +2193,18 @@ function createChannel(ctx, config) {
   const activeTurns = new Map()
 
   /**
+   * 这个会话现在是不是有一轮在跑（能插话的那种）。
+   * 依据是 turn/start・turn/end 的跟踪，加上微信自己这一轮 started 但事件还没到的窗口。
+   * @param {string} sessionId 会话 id
+   * @returns {boolean} true 表示正在跑
+   */
+  function isSessionBusy(sessionId) {
+    if (!sessionId) return false
+    if (activeTurns.has(String(sessionId))) return true
+    return Object.values(state.bindings).some((item) => item.sessionId === sessionId && item.turnActive)
+  }
+
+  /**
    * 记录会话的开轮/收轮，供进度提示使用。
    * @param {object|string} session 会话对象或会话 id
    * @param {{ type?: string }} event Session 事件
@@ -2309,6 +2323,30 @@ function createChannel(ctx, config) {
     rememberQuote(accountId, chatId, msg?.message_id, relaySummary(msg) || text)
     const binding = ensureBinding(accountId, chatId, fromUserId, String(msg?.context_token ?? ''))
     const signal = monitors.get(accountId)?.abort?.signal ?? new AbortController().signal
+
+    // 会话正在跑：把这条消息直接插进当前对话（steer），不再排在这一轮后面等
+    if (config.insertWhileBusy && isSessionBusy(binding.sessionId)) {
+      const framed = config.messagePrefix ? `${config.messagePrefix}${text}` : text
+      try {
+        await promptSession(binding.sessionId, framed, signal, 'steer')
+        binding.lastInboundAt = Date.now()
+        saveState()
+        const now = Date.now()
+        if (!binding.lastInsertAckAt || now - binding.lastInsertAckAt > 10_000) {
+          binding.lastInsertAckAt = now
+          await replyText(binding, '📥 已插入当前对话（不用等这一轮结束）')
+        }
+        log('info', 'inbound steered into running turn', {
+          accountId,
+          chatId,
+          sessionId: binding.sessionId,
+          chars: text.length,
+        })
+        return { inserted: true, sessionId: binding.sessionId }
+      } catch (err) {
+        log('warn', 'steer failed, fall back to queue', { accountId, chatId, error: String(err?.message ?? err) })
+      }
+    }
 
     return enqueue(binding.key, async () => {
       log('info', 'inbound', { accountId, chatId, chars: text.length })
