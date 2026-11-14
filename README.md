@@ -24,6 +24,7 @@
 - **微信引用**：在微信里长按「引用」某条消息（含只选中一段）再发问时，被引用的原文会以 `【引用】…` 的形式一起进入模型上下文。插件维护最近 800 条收发消息的引用库（`quotes.json`），客户端只给 `svr_id` 时也能按 id 还原原文，再按 `startindex/endindex` 截取选中片段。
 - **选项 / 审批在微信里作答**：DSH 弹出 `ask_user_question` 选项卡或审批卡时，插件会把题目和选项同步发到绑定的微信：回序号（`1`、`1,3`）或直接回文字即可作答；审批回 `1`（允许一次）/ `2`（拒绝）。微信里等不到回复（默认 110 秒）就把这次请求交还电脑端弹卡，不会把会话卡死。由 `relayOptions` / `optionReplyTimeoutMs` 控制。
 - **长任务进度提示**：绑定会话的一轮跑得久时，每隔 `progressIntervalMs`（默认 2 分钟）在微信里发一条「⏳ 还在处理：已经思考 X 分 Y 秒（第 N 次进度）」；如果这时正在等你回选项，会改成「⌛ 在等你回复：已经等了 X 分」。轮次结束自动停，不会刷屏。
+- **微信里切换会话**：在微信里发 `/sessions` 看最近会话列表，`/use 2` 切到第 2 个，`/new` 开新会话，`/current` 看当前绑定；不在这几个命令里的 `/xxx` 照常发给会话。切换立即生效（不改电脑端任何东西），下一轮就发到新会话。
 - **Agent 工具**：`wechat_login` / `wechat_verify_code` / `wechat_status` / `wechat_bind` / `wechat_unbind` / `wechat_send` / `wechat_send_file` / `wechat_report` / `wechat_logout` / `wechat_simulate` / `wechat_debug`。
 
 ## 安装
@@ -77,6 +78,21 @@ plugin_manager: install_bundle  target=<本目录的绝对路径>
 所有请求带 `iLink-App-Id` / `iLink-App-ClientVersion` / `AuthorizationType: ilink_bot_token` / `X-WECHAT-UIN`（随机 uint32 → 十进制 → base64）头，body 带 `base_info`。
 
 协议细节参考腾讯官方包 [`@tencent-weixin/openclaw-weixin`](https://www.npmjs.com/package/@tencent-weixin/openclaw-weixin)（MIT）与社区逆向文档 [`weixin-ClawBot-API`](https://github.com/sintrb/weixin-ClawBot-API)。本仓库不含腾讯代码。
+
+## 微信内命令
+
+| 命令 | 作用 |
+| --- | --- |
+| `/sessions`（`/ls`、`/list`） | 列出最近 12 个会话（标题 · id 后 8 位，标出「运行中 / 当前」），并记住这次的序号 |
+| `/use 2`（`/switch 2`） | 切到上次列表里的第 2 个；也可以直接 `/use <完整会话 id>` |
+| `/new` | 换到一个全新会话（下一条消息开始新对话，原会话保留在电脑端） |
+| `/current`（`/now`） | 显示当前绑定会话、是否在线、是手动绑定还是自动会话 |
+| `/help`（`/?`） | 命令帮助 |
+
+- 切换只改微信这边绑定哪个会话，不会影响电脑端已经打开的会话或历史。
+- 正在回复的那一轮没结束时，`/use`、`/new` 会先提示等结束，避免把回复发到一半切走。
+- 命令只在**整条消息**以 `/`（或全角 `／`）开头且命中上表时生效；其他 `/xxx` 照常作为文字发给当前会话，不影响 agent 自己的斜杠命令。
+- 想切到的会话如果没打开，插件会用 `sessionController.resolveAgent` 尝试恢复；恢复不了（已归档、不在本机）会提示你先在电脑端打开。
 
 ## 配置
 

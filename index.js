@@ -32,8 +32,8 @@ const ILINK_APP_ID = 'bot'
 /** 0x000MMNNPP：与官方 2.4.10 对齐 */
 const ILINK_APP_CLIENT_VERSION = (2 << 16) | (4 << 8) | 10
 /** 插件版本：与 package.json 保持一致，出现在 base_info.channel_version 里 */
-const CHANNEL_VERSION = '2.4.4'
-const BOT_AGENT = 'DSH-WeChat/2.4.4'
+const CHANNEL_VERSION = '2.4.5'
+const BOT_AGENT = 'DSH-WeChat/2.4.5'
 /** 媒体 CDN（官方 getUploadUrl 没返回 upload_full_url 时用它拼上传地址） */
 const CDN_BASE = 'https://novac2c.cdn.weixin.qq.com/c2c'
 
@@ -421,6 +421,45 @@ function formatDuration(ms) {
   if (hours > 0) return `${hours} 小时 ${minutes} 分`
   if (minutes > 0) return `${minutes} 分 ${seconds} 秒`
   return `${seconds} 秒`
+}
+
+/** 微信里认的会话命令；不在这张表里的 `/xxx` 不拦截，照常发给会话。 */
+const WECHAT_COMMANDS = new Set(['sessions', 'ls', 'list', 'use', 'switch', 'new', 'current', 'now', 'help', '?'])
+
+/** `/help` 的说明文本。 */
+const WECHAT_HELP_TEXT = [
+  '🧭 微信会话命令',
+  '/sessions  列出最近会话',
+  '/use 2     切到第 2 个会话',
+  '/new       换到新会话',
+  '/current   查看当前会话',
+  '/help      这条帮助',
+  '',
+  '其他消息照常发给当前会话。',
+].join('\n')
+
+/**
+ * 解析微信侧会话命令。
+ * @param {string} text 微信原文
+ * @returns {{ name: string, args: string } | null} 命中的命令；不是命令时返回 null
+ */
+function parseWechatCommand(text) {
+  const raw = String(text ?? '').trim()
+  const match = /^[\/／]\s*([a-zA-Z?]+)\s*([\s\S]*)$/.exec(raw)
+  if (!match) return null
+  const name = match[1].toLowerCase()
+  if (!WECHAT_COMMANDS.has(name)) return null
+  return { name, args: String(match[2] ?? '').trim() }
+}
+
+/**
+ * 会话在微信里的显示名：标题（没有就用 id）+ 末 8 位。
+ * @param {object} item 会话行
+ * @returns {string} 显示名
+ */
+function sessionDisplayName(item) {
+  const title = String(item?.title ?? '').trim()
+  return title || String(item?.id ?? '').slice(0, 24)
 }
 
 // ---------------------------------------------------------------------------
@@ -2016,6 +2055,136 @@ function createChannel(ctx, config) {
     return optionWaits.get(bindingKeyOf(accountId, chatId))
   }
 
+  // -- 会话切换命令：/sessions /use /new /current /help --------------------
+
+  async function replyText(binding, text) {
+    try {
+      await sendToBinding(binding, text)
+    } catch (err) {
+      log('warn', 'command reply failed', { key: binding.key, error: String(err?.message ?? err) })
+    }
+  }
+
+  function shortSessionId(id) {
+    return String(id ?? '').slice(-8)
+  }
+
+  function formatSessionRow(item, index, currentId) {
+    const marks = []
+    if (item.running) marks.push('运行中')
+    if (item.id === currentId) marks.push('当前')
+    const suffix = marks.length ? `（${marks.join(' · ')}）` : ''
+    return `${index + 1}. ${sessionDisplayName(item)} · ${shortSessionId(item.id)}${suffix}`
+  }
+
+  /** 会话列表按最近活动排序；分页只取前 12 条供微信选择。 */
+  async function sortedSessions() {
+    const rows = await listSessions()
+    return rows.sort((a, b) => Number(b.updatedAt ?? 0) - Number(a.updatedAt ?? 0))
+  }
+
+  /**
+   * 处理一条微信会话命令。
+   * @returns {Promise<boolean>} true 表示已作为命令处理（不再转发给会话）
+   */
+  async function handleSessionCommand(binding, command) {
+    const name = command.name
+    if (name === 'help' || name === '?') {
+      await replyText(binding, WECHAT_HELP_TEXT)
+      return true
+    }
+    if (name === 'current' || name === 'now') {
+      const rows = await sortedSessions()
+      const current = rows.find((item) => item.id === binding.sessionId)
+      const live = Boolean(ctx.get('sessions')?.get?.(binding.sessionId))
+      const lines = ['📌 当前会话']
+      lines.push(current ? `${sessionDisplayName(current)} · ${shortSessionId(current.id)}` : `${binding.sessionId}（不在会话列表里）`)
+      lines.push(
+        `状态：${live ? '在线' : binding.explicit ? '未打开（下条消息会尝试打开）' : '自动会话（下条消息新建）'}`,
+      )
+      lines.push(`绑定：${binding.explicit ? '手动绑定' : '自动会话'}`)
+      await replyText(binding, lines.join('\n'))
+      return true
+    }
+    if (name === 'sessions' || name === 'ls' || name === 'list') {
+      const rows = (await sortedSessions()).slice(0, 12)
+      if (rows.length === 0) {
+        await replyText(binding, '（没有可切换的会话）')
+        return true
+      }
+      binding.sessionOptions = rows.map((item) => item.id)
+      saveState(true)
+      const lines = ['📚 最近会话（回 /use 序号 切换）']
+      rows.forEach((item, index) => lines.push(formatSessionRow(item, index, binding.sessionId)))
+      lines.push('', '其他：/new 新会话 · /current 当前 · /help 帮助')
+      await replyText(binding, lines.join('\n'))
+      return true
+    }
+    if (name === 'new') {
+      if (binding.turnActive) {
+        await replyText(binding, '⏳ 这一轮还在回复，等结束再 /new。')
+        return true
+      }
+      unbindSession(binding.key)
+      await replyText(binding, '🆕 已换到新会话：下一条消息会开一段新对话（原会话仍保留在电脑端）。')
+      return true
+    }
+    if (name === 'use' || name === 'switch') {
+      if (binding.turnActive) {
+        await replyText(binding, '⏳ 这一轮还在回复，等结束再切换。')
+        return true
+      }
+      const args = command.args
+      if (!args) {
+        await replyText(binding, '用法：/use 序号（先发 /sessions 拿列表），或 /use <会话 id>')
+        return true
+      }
+      let targetId = ''
+      if (/^\d+$/.test(args)) {
+        const options = Array.isArray(binding.sessionOptions) ? binding.sessionOptions : []
+        targetId = String(options[Number(args) - 1] ?? '')
+        if (!targetId) {
+          await replyText(binding, `序号 ${args} 不在上次列表里，先发 /sessions 重新取列表。`)
+          return true
+        }
+      } else {
+        targetId = args.replace(/^[<"'（(]+|[>"'）)]+$/g, '').trim()
+      }
+      let live = Boolean(ctx.get('sessions')?.get?.(targetId))
+      if (!live) {
+        const controller = ctx.get('sessionController')
+        if (controller?.resolveAgent) {
+          try {
+            const resolved = await controller.resolveAgent(targetId)
+            if (resolved?.error) {
+              await replyText(binding, `⚠️ 打不开这个会话：${resolved.error.code ?? 'unknown'}`)
+              return true
+            }
+            live = Boolean(resolved?.agent) || Boolean(ctx.get('sessions')?.get?.(targetId))
+          } catch (err) {
+            log('warn', 'switch session failed', { key: binding.key, error: String(err?.message ?? err) })
+          }
+        }
+      }
+      if (!live) {
+        await replyText(binding, '⚠️ 这个会话现在打不开（可能已归档或不在本机），先在电脑端打开它再试。')
+        return true
+      }
+      const rows = await sortedSessions()
+      const known = rows.find((item) => item.id === targetId)
+      const result = bindSession(binding.key, targetId)
+      if (!result?.ok) {
+        await replyText(binding, `⚠️ 切换失败：${result?.message ?? '未知原因'}`)
+        return true
+      }
+      log('info', 'session switched from wechat', { key: binding.key, sessionId: targetId })
+      const label = known ? `${sessionDisplayName(known)} · ${shortSessionId(known.id)}` : shortSessionId(targetId)
+      await replyText(binding, `✅ 已切换到：${label}\n下一条消息会发到这里。`)
+      return true
+    }
+    return false
+  }
+
   // -- 进度提示：一轮跑得久时，隔一段时间报一次「已经思考多久」 -------------
 
   /** sessionId → { startedAt, beats } */
@@ -2123,6 +2292,17 @@ function createChannel(ctx, config) {
       log('info', 'option reply', { accountId, chatId, kind: waiting.kind, chars: text.length })
       waiting.settle({ status: 'ok', text })
       return { optionReply: true, kind: waiting.kind }
+    }
+
+    // 会话命令：/sessions /use /new /current /help；表外的 /xxx 照常转发给会话
+    const command = parseWechatCommand(text)
+    if (command) {
+      const bindingForCommand =
+        state.bindings[bindingKeyOf(accountId, chatId)] ??
+        ensureBinding(accountId, chatId, fromUserId, String(msg?.context_token ?? ''))
+      log('info', 'wechat command', { accountId, chatId, command: command.name })
+      await handleSessionCommand(bindingForCommand, command)
+      return { command: command.name }
     }
 
     // 记下这条入站原文供后续「引用」回查；用干净摘要（不带本地媒体路径）
@@ -3120,6 +3300,8 @@ export const __test = {
   parseApprovalReply,
   describeApprovalReason,
   formatDuration,
+  parseWechatCommand,
+  sessionDisplayName,
   normalizeConfig,
   createChannel,
 }
