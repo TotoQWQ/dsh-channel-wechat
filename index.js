@@ -32,8 +32,8 @@ const ILINK_APP_ID = 'bot'
 /** 0x000MMNNPP：与官方 2.4.10 对齐 */
 const ILINK_APP_CLIENT_VERSION = (2 << 16) | (4 << 8) | 10
 /** 插件版本：与 package.json 保持一致，出现在 base_info.channel_version 里 */
-const CHANNEL_VERSION = '2.10.0'
-const BOT_AGENT = 'DSH-WeChat/2.10.0'
+const CHANNEL_VERSION = '2.10.1'
+const BOT_AGENT = 'DSH-WeChat/2.10.1'
 /** 媒体 CDN（官方 getUploadUrl 没返回 upload_full_url 时用它拼上传地址） */
 const CDN_BASE = 'https://novac2c.cdn.weixin.qq.com/c2c'
 
@@ -691,6 +691,11 @@ function evaluateAccountHealth(account, running, now, staleMs) {
  */
 function isDeliveryError(message) {
   return /^sendmessage\b/.test(String(message ?? ''))
+}
+
+/** 旧版本会把自己生成的「处理失败」提示也塞进补发队列，恢复时要跳过这些噪声。 */
+function isNoisePending(text) {
+  return /^⚠️ DSH 处理失败/.test(String(text ?? ''))
 }
 
 /** 同一进程里同一 stateDir 只允许一个活跃 channel（防热重载泄漏出多个轮询/定时器）。 */
@@ -2259,13 +2264,21 @@ function createChannel(ctx, config) {
       return 0
     }
     const fresh = queue.filter((item) => Date.now() - item.at <= pendingTtl())
-    const dropped = queue.length - fresh.length
-    if (dropped > 0) {
-      log('warn', 'pending expired, dropped', { key: binding.key, dropped })
+    const expired = queue.length - fresh.length
+    if (expired > 0) {
+      log('warn', 'pending expired, dropped', { key: binding.key, dropped: expired })
       binding.pending = fresh
       saveState()
     }
-    queue = fresh
+    // 旧版本留下的「处理失败」提示直接丢掉，不再补发给用户
+    const cleaned = fresh.filter((item) => !isNoisePending(item.text))
+    const noise = fresh.length - cleaned.length
+    if (noise > 0) {
+      log('warn', 'pending noise dropped', { key: binding.key, dropped: noise })
+      binding.pending = cleaned
+      saveState()
+    }
+    queue = cleaned
     if (queue.length === 0) return 0
     if (Date.now() < (binding.nextRetryAt ?? 0)) return 0
     let sent = 0

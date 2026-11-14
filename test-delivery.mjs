@@ -146,6 +146,22 @@ try {
     channel.stop()
   })
 
+  await check('补发时跳过旧版留下的「处理失败」提示', async () => {
+    const dir4 = path.join(root, 'state4')
+    makeState(dir4)
+    const channel = createChannel(ctx, { ...baseConfig, stateDir: dir4 })
+    mode = 'reject'
+    await channel.sendTextToUser({ accountId, toUserId: chatId.replace(/^user:/, ''), text: '⚠️ DSH 处理失败：sendmessage ret=-2' })
+    assert.equal(channel.snapshot().bindings[0].pending, 1)
+    mode = 'ok'
+    sent.length = 0
+    await inbound(channel, '/ping', 'm-9')
+    assert.ok(!sent.some((item) => item.startsWith('⚠️ DSH 处理失败')), `不应补发失败提示：${JSON.stringify(sent)}`)
+    const saved = JSON.parse(fs.readFileSync(path.join(dir4, 'state.json'), 'utf8'))
+    assert.equal((Object.values(saved.bindings)[0].pending ?? []).length, 0)
+    channel.stop()
+  })
+
   await check('同一 stateDir 只保留一个活跃 channel', async () => {
     const dir3 = path.join(root, 'state3')
     makeState(dir3)
