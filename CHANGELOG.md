@@ -6,6 +6,24 @@
 
 ---
 
+## 2.17.1 — 2026-11-14
+
+### 修复（故障报告：progress 重试风暴把真实回复打进冷却）
+
+- **progress / thinking 类消息不再计入发送熔断**：`sendToChat` 支持 `countFailure: false`，`sendProgressMessage` 传 false；
+  进度消息失败只退避，不会把账号打进 `send paused`，真实回复不再被自己发的进度心跳挡住。
+- **熔断期间进度消息直接跳过**：`sendProgressMessage` 先检查 `sendPauseRemaining`，暂停期间不请求接口、不记录失败。
+- **失败日志限流**：同一绑定 `progress send failed` 最多每分钟一条，避免失败风暴刷满日志。
+- **progressTick 防重入**：`progressBusy` 保证并发/重叠 tick 不会叠加发送；每轮进度最多 20 条。
+- **入站清除熔断**：新消息带回新 `context_token` 时 `flushPendingOnInbound` 会 `sendHealth.delete(accountId)`，补发/回复可以立即重试，不必等 5 分钟冷却。
+- 新自测 `test-faults.mjs`（4 项：progress 不计熔断、熔断期间不请求、入站清熔断、tick 防重入）。
+
+### 变更
+
+- 版本 2.17.0 → 2.17.1（`CHANNEL_VERSION` / `bot_agent` 同步）。
+
+---
+
 ## 2.17.0 — 2026-11-14
 
 ### 变更（默认值收敛为“可选”）

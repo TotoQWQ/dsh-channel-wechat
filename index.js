@@ -37,8 +37,8 @@ const ILINK_APP_ID = 'bot'
 /** 0x000MMNNPP：与官方 2.4.10 对齐 */
 const ILINK_APP_CLIENT_VERSION = (2 << 16) | (4 << 8) | 10
 /** 插件版本：与 package.json 保持一致，出现在 base_info.channel_version 里 */
-const CHANNEL_VERSION = '2.17.0'
-const BOT_AGENT = 'DSH-WeChat/2.17.0'
+const CHANNEL_VERSION = '2.17.1'
+const BOT_AGENT = 'DSH-WeChat/2.17.1'
 /** 媒体 CDN（官方 getUploadUrl 没返回 upload_full_url 时用它拼上传地址） */
 const CDN_BASE = 'https://novac2c.cdn.weixin.qq.com/c2c'
 
@@ -1240,6 +1240,7 @@ function createChannel(ctx, config) {
   let mirrorBusy = false
   let saveTimer = null
   let progressTimer = null
+  let progressBusy = false
   let healthTimer = null
   let hotReloadTimer = null
   let hotReloadBaseline = 0
@@ -2213,7 +2214,7 @@ function createChannel(ctx, config) {
     sendHealth.set(accountId, entry)
   }
 
-  /** 带动熔断的发送入口；真正的请求在 sendToChatOnce。 */
+  /** 带动熔断的发送入口；真正的请求在 sendToChatOnce。progress/thinking 这类附加消息不参与熔断计数。 */
   async function sendToChat(args) {
     const paused = sendPauseRemaining(args?.accountId)
     if (paused > 0) throw new Error(`发送暂缓：连续失败过多，${Math.ceil(paused / 1000)} 秒后自动恢复`)
@@ -2222,7 +2223,7 @@ function createChannel(ctx, config) {
       noteSendSuccess(args?.accountId)
       return result
     } catch (err) {
-      noteSendFailure(args?.accountId, err?.message ?? err)
+      if (args?.countFailure !== false) noteSendFailure(args?.accountId, err?.message ?? err)
       throw err
     }
   }
@@ -2593,8 +2594,10 @@ function createChannel(ctx, config) {
 
   /** 入站带回新 context_token 时补发旧队列；失败不阻断这条消息的处理。 */
   async function flushPendingOnInbound(binding) {
-    if ((binding.pending?.length ?? 0) === 0) return 0
+    // 新消息意味着 context_token 已刷新：清掉该账号的熔断，让补发/回复有机会立即重试
+    sendHealth.delete(binding.accountId)
     binding.nextRetryAt = 0
+    if ((binding.pending?.length ?? 0) === 0) return 0
     try {
       const flushed = await flushPending(binding)
       if (flushed > 0) log('info', 'pending flushed on inbound', { key: binding.key, flushed })
@@ -4446,26 +4449,43 @@ function createChannel(ctx, config) {
   }
 
   async function sendProgressMessage(binding, text) {
+    // 进度类消息是锦上添花：熔断期间/刚失败过就直接跳过，不请求、不记失败、不刷日志
+    if (sendPauseRemaining(binding.accountId) > 0) return false
+    if (Number(binding.progressRetryAfter ?? 0) > Date.now()) return false
     try {
       await sendToChat({
         accountId: binding.accountId,
         toUserId: binding.toUserId || String(binding.chatId).replace(/^user:/, ''),
         contextToken: binding.contextToken,
         text,
+        countFailure: false,
       })
       binding.lastOutboundAt = Date.now()
       return true
     } catch (err) {
-      // 进度提示是尽力而为：失败不排队，避免恢复后一次性刷屏；暂时退避 2 分钟再说
       binding.progressRetryAfter = Date.now() + 120_000
-      log('warn', 'progress send failed', { key: binding.key, error: String(err?.message ?? err) })
+      // 同一绑定最多每分钟记一条，避免失败风暴刷满日志
+      const lastWarn = Number(binding.progressWarnAt ?? 0)
+      if (Date.now() - lastWarn > 60_000) {
+        binding.progressWarnAt = Date.now()
+        log('warn', 'progress send failed', { key: binding.key, error: String(err?.message ?? err) })
+      }
       return false
     }
   }
 
   /** 到点就给所有有绑定的会话发一条进度；等待选项回复时改报「等你回复」。 */
   async function progressTick() {
-    if (!config.progressHeartbeat) return
+    if (!config.progressHeartbeat || progressBusy) return
+    progressBusy = true
+    try {
+      await progressTickOnce()
+    } finally {
+      progressBusy = false
+    }
+  }
+
+  async function progressTickOnce() {
     const now = Date.now()
     for (const [sessionId, turn] of [...activeTurns]) {
       const session = ctx.get('sessions')?.get?.(sessionId)
@@ -4476,6 +4496,7 @@ function createChannel(ctx, config) {
       }
       const targets = optionTargets(sessionId)
       if (targets.length === 0) continue
+      if (turn.beats >= 20) continue
       const elapsed = now - turn.startedAt
       if (elapsed < config.progressIntervalMs * (turn.beats + 1)) continue
       turn.beats += 1
@@ -5234,6 +5255,8 @@ function createChannel(ctx, config) {
     featureValues,
     setFeature,
     progressTick,
+    sendProgressMessage,
+    sendPauseRemaining,
     flushPending,
     running: () => Boolean(progressTimer || mirrorTimer || healthTimer),
     sendHealth: () => Object.fromEntries(sendHealth),
