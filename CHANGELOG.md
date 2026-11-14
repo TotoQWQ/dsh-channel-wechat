@@ -6,6 +6,21 @@
 
 ---
 
+## 2.8.0 — 2026-11-14
+
+### 新增
+
+- **断联检测 `/ping`（`/health`）**：微信里直接查连接状态——每个账号是否在轮询、最近一次成功轮询多久前、最近错误、镜像与绑定数；正常回「✅ 微信连接正常」，异常回「⚠️ 微信连接异常」并列出原因。
+- **后台自动恢复**：每 30 秒检查一次，长轮询超过 `healthStaleMs`（默认 120 秒）没有成功就自动重启该账号的 monitor（`stopMonitor → startMonitor`），记录 `staleRestarts`，同一账号至少间隔一个 `healthStaleMs` 才再次重启，避免抖动；`healthCheck: false` 可关。
+- **面板健康指示**：snapshot 增加 `health: { ok, staleAfterMs, accounts[] }`，面板标题栏显示「连接正常（N 秒前轮询）/ 连接异常」。
+- 新自测 `test-health.mjs`（5 项：健康度纯函数、未启动时 /ping、启动后 /ping、卡住自动重启与去抖、healthCheck=false）。
+
+### 变更
+
+- 版本 2.7.1 → 2.8.0（`CHANNEL_VERSION` / `bot_agent` 同步）。
+
+---
+
 ## 2.7.1 — 2026-11-14
 
 ### 修复

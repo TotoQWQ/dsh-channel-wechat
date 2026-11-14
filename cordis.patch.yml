@@ -59,6 +59,10 @@
         thinkingSummaryIntervalMs: 30000
         # 单条摘要最多多少字
         thinkingSummaryChars: 120
+        # 断联检测：长轮询多久没成功算断联（毫秒，最短 30000）
+        healthStaleMs: 120000
+        # 卡住时自动重启该账号的轮询
+        healthCheck: true
         # 跨账号转发：同一会话下，A 号收到的消息也发到 B/C 号的微信
         relayAcrossAccounts: true
         relayPrefix: '[{account}] '

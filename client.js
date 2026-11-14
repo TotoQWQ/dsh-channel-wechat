@@ -293,6 +293,15 @@ window.__ModuleLoader__.load({
             children: accounts.length > 0 ? `${accounts.length} 个账号在线` : STATUS_TEXT[login.status],
           }),
           h('span', { style: styles.muted }, state?.mirror?.running ? '双向镜像运行中' : '镜像未运行'),
+          state?.health
+            ? h(
+                'span',
+                { style: { ...styles.muted, color: state.health.ok ? '#2f9e44' : '#d64545' } },
+                state.health.ok
+                  ? `连接正常${state.health.accounts?.[0]?.lastPollAgoMs != null ? `（${Math.max(0, Math.round(state.health.accounts[0].lastPollAgoMs / 1000))} 秒前轮询）` : ''}`
+                  : '连接异常',
+              )
+            : null,
           h(
             'div',
             { style: { marginLeft: 'auto', ...styles.actions } },

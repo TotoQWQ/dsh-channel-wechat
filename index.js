@@ -32,8 +32,8 @@ const ILINK_APP_ID = 'bot'
 /** 0x000MMNNPP：与官方 2.4.10 对齐 */
 const ILINK_APP_CLIENT_VERSION = (2 << 16) | (4 << 8) | 10
 /** 插件版本：与 package.json 保持一致，出现在 base_info.channel_version 里 */
-const CHANNEL_VERSION = '2.7.1'
-const BOT_AGENT = 'DSH-WeChat/2.7.1'
+const CHANNEL_VERSION = '2.8.0'
+const BOT_AGENT = 'DSH-WeChat/2.8.0'
 /** 媒体 CDN（官方 getUploadUrl 没返回 upload_full_url 时用它拼上传地址） */
 const CDN_BASE = 'https://novac2c.cdn.weixin.qq.com/c2c'
 
@@ -538,6 +538,8 @@ const WECHAT_COMMANDS = new Set([
   'policy',
   'sticker',
   'emotion',
+  'ping',
+  'health',
   'help',
   '?',
 ])
@@ -558,6 +560,7 @@ const WECHAT_HELP_TEXT = [
   '/approval ask|never  审批策略',
   '/sticker   随机发一张表情包（/sticker 关键词 可筛，/sticker 列表 看目录）',
   '/emotion   表情包库：add / end / list / send / rename / delete / other source true|false',
+  '/ping      检查微信连接是否正常（轮询 / 错误 / 镜像）',
   '/stop      停止当前这一轮',
   '/help      这条帮助',
   '',
@@ -589,6 +592,27 @@ function parseWechatCommand(text) {
   const name = match[1].toLowerCase()
   if (!WECHAT_COMMANDS.has(name)) return null
   return { name, args: String(match[2] ?? '').trim() }
+}
+
+/**
+ * 评估一个账号的连接健康度（纯函数）。
+ * @param {object} account 账号记录
+ * @param {boolean} running 长轮询是否在跑
+ * @param {number} now 当前时间
+ * @param {number} staleMs 多久没成功轮询算断联
+ * @returns {{ running: boolean, lastPollAt: number | null, lastPollAgoMs: number | null, stale: boolean, lastError: string }}
+ */
+function evaluateAccountHealth(account, running, now, staleMs) {
+  const lastPollAt = Number(account?.lastPollAt ?? 0)
+  const age = lastPollAt > 0 ? now - lastPollAt : Number.POSITIVE_INFINITY
+  const stale = Boolean(running && Number.isFinite(age) && age > staleMs)
+  return {
+    running,
+    lastPollAt: lastPollAt > 0 ? lastPollAt : null,
+    lastPollAgoMs: Number.isFinite(age) ? age : null,
+    stale,
+    lastError: String(account?.lastError ?? ''),
+  }
 }
 
 /**
@@ -765,6 +789,10 @@ function normalizeConfig(raw) {
       Number.isFinite(c.thinkingSummaryChars) && c.thinkingSummaryChars >= 40
         ? Math.min(500, Math.floor(c.thinkingSummaryChars))
         : 120,
+    // 断联检测：长轮询多久没成功算断联（毫秒），以及是否定期自动重启卡住的 monitor
+    healthCheck: c.healthCheck !== false,
+    healthStaleMs:
+      Number.isFinite(c.healthStaleMs) && c.healthStaleMs >= 30_000 ? c.healthStaleMs : 120_000,
     stateDir,
   }
 }
@@ -809,6 +837,7 @@ function createChannel(ctx, config) {
   let mirrorBusy = false
   let saveTimer = null
   let progressTimer = null
+  let healthTimer = null
 
   // 构造时先读一次状态：工具与测试可以直接使用绑定表；start() 会再读一次（幂等）
   loadState()
@@ -3022,6 +3051,31 @@ function createChannel(ctx, config) {
       await replyText(binding, lines.join('\n'))
       return true
     }
+    if (name === 'ping' || name === 'health') {
+      const health = healthSummary()
+      const lines = [health.ok ? '✅ 微信连接正常' : '⚠️ 微信连接异常']
+      if (health.accounts.length === 0) lines.push('（还没有已登录的账号）')
+      for (const item of health.accounts) {
+        const ago =
+          item.lastPollAgoMs === null
+            ? '还没成功轮询过'
+            : `${Math.max(0, Math.round(item.lastPollAgoMs / 1000))} 秒前`
+        const marks = []
+        if (!item.running) marks.push('未运行')
+        if (item.stale) marks.push('疑似断联')
+        lines.push(
+          `${item.id.slice(0, 12)} · ${item.running ? '轮询中' : '未运行'} · 最近轮询 ${ago}` +
+            `${marks.length > 0 ? ` · ${marks.join(' · ')}` : ''}`,
+        )
+        if (item.lastError) lines.push(`　错误：${item.lastError}`)
+      }
+      lines.push(`镜像：${mirrorTimer ? '运行中' : '未运行'} · 绑定会话：${Object.keys(state.bindings).length}`)
+      if (!health.ok && health.accounts.length > 0) {
+        lines.push('（长期卡住会自动重启该账号的轮询，仍不行就重扫码）')
+      }
+      await replyText(binding, lines.join('\n'))
+      return true
+    }
     if (name === 'stop') {
       const controller = ctx.get('sessionController')
       if (!controller?.cancel) {
@@ -3520,6 +3574,76 @@ function createChannel(ctx, config) {
     }
   }
 
+  // -- 断联检测：长轮询是否卡住，卡住就重启该账号的 monitor ----------------
+
+  function accountHealth(account, now = Date.now()) {
+    const runtime = accountRuntime(account.id)
+    return { id: account.id, ...evaluateAccountHealth(account, runtime.running, now, config.healthStaleMs) }
+  }
+
+  function healthSummary(now = Date.now()) {
+    const list = accounts().map((account) => accountHealth(account, now))
+    const ok = list.length > 0 && list.every((item) => item.running && !item.stale && !item.lastError)
+    return { ok, staleAfterMs: config.healthStaleMs, accounts: list }
+  }
+
+  function staleAccountIds(now = Date.now()) {
+    return accounts()
+      .filter((account) => accountHealth(account, now).stale)
+      .map((account) => account.id)
+  }
+
+  /** 跑一次断联检查；卡住的账号重启 monitor（返回被重启的账号 id）。 */
+  function healthTick(now = Date.now()) {
+    if (!config.healthCheck) return []
+    const stale = staleAccountIds(now)
+    const restarted = []
+    for (const accountId of stale) {
+      const account = state.accounts[accountId]
+      if (!account) continue
+      const lastRestart = Number(account.lastStaleRestartAt ?? 0)
+      if (now - lastRestart < config.healthStaleMs) continue
+      const age = account.lastPollAt ? now - Number(account.lastPollAt) : null
+      log('warn', 'poll stale, restarting monitor', {
+        accountId,
+        staleMs: age,
+        thresholdMs: config.healthStaleMs,
+      })
+      try {
+        stopMonitor(accountId)
+      } catch {
+        /* ignore */
+      }
+      try {
+        startMonitor(accountId)
+      } catch {
+        /* ignore */
+      }
+      account.lastStaleRestartAt = now
+      account.staleRestarts = Number(account.staleRestarts ?? 0) + 1
+      restarted.push(accountId)
+    }
+    if (restarted.length > 0) saveState(true)
+    return restarted
+  }
+
+  function startHealth() {
+    if (healthTimer) return
+    healthTimer = setInterval(() => {
+      try {
+        healthTick()
+      } catch (err) {
+        log('warn', 'health tick failed', { error: String(err?.message ?? err) })
+      }
+    }, 30_000)
+    if (typeof healthTimer?.unref === 'function') healthTimer.unref()
+  }
+
+  function stopHealth() {
+    if (healthTimer) clearInterval(healthTimer)
+    healthTimer = null
+  }
+
   function startProgress() {
     if (progressTimer) return
     progressTimer = setInterval(() => {
@@ -3812,6 +3936,7 @@ function createChannel(ctx, config) {
         usage: usageOf(binding.sessionId),
       })),
       mirror: { running: Boolean(mirrorTimer), intervalMs: config.mirrorIntervalMs },
+      health: healthSummary(),
       settings: { defaultSessionId: state.settings?.defaultSessionId || '' },
       emotions: emotionSummary(),
       options: { relay: config.relayOptions, waiting: optionWaits.size, replyTimeoutMs: config.optionReplyTimeoutMs },
@@ -4025,6 +4150,7 @@ function createChannel(ctx, config) {
     for (const account of accounts()) startMonitor(account.id)
     startMirror()
     startProgress()
+    startHealth()
     log('info', 'channel started', { accounts: accounts().length, quotes: Object.keys(quotes).length })
   }
 
@@ -4032,6 +4158,7 @@ function createChannel(ctx, config) {
     for (const accountId of [...monitors.keys()]) stopMonitor(accountId)
     stopMirror()
     stopProgress()
+    stopHealth()
     login.abort?.abort()
     login.abort = null
     if (saveTimer) {
@@ -4057,6 +4184,9 @@ function createChannel(ctx, config) {
     observeSessionEvent,
     observeAssistantStream,
     maybeSendThinking,
+    healthSummary,
+    healthTick,
+    staleAccountIds,
     progressTick,
     isSessionBusy,
     usageOf,
@@ -4655,6 +4785,7 @@ export const __test = {
   emotionContextScore,
   sanitizeEmotionStem,
   summarizeThinkingDelta,
+  evaluateAccountHealth,
   decorateReply,
   listStickers,
   pickSticker,
