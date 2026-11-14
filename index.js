@@ -37,8 +37,8 @@ const ILINK_APP_ID = 'bot'
 /** 0x000MMNNPP：与官方 2.4.10 对齐 */
 const ILINK_APP_CLIENT_VERSION = (2 << 16) | (4 << 8) | 10
 /** 插件版本：与 package.json 保持一致，出现在 base_info.channel_version 里 */
-const CHANNEL_VERSION = '2.18.2'
-const BOT_AGENT = 'DSH-WeChat/2.18.2'
+const CHANNEL_VERSION = '2.19.0'
+const BOT_AGENT = 'DSH-WeChat/2.19.0'
 /** 媒体 CDN（官方 getUploadUrl 没返回 upload_full_url 时用它拼上传地址） */
 const CDN_BASE = 'https://novac2c.cdn.weixin.qq.com/c2c'
 
@@ -429,18 +429,38 @@ function formatDuration(ms) {
 }
 
 /** 表情包分类（目录名即分类名）。 */
-const EMOTION_CATEGORIES = ['开心', '难过', '生气', '惊讶', '爱你', '无语', '摸鱼', '加油', '其他']
+const EMOTION_CATEGORIES = [
+  '开心', '大笑', '得意', '害羞', '爱你', '亲亲', '抱抱', '感谢', '庆祝',
+  '加油', '冲鸭', '摸鱼', '困', '难过', '委屈', '哭', '生气', '发火',
+  '无语', '尴尬', '惊讶', '震惊', '害怕', '安慰', '其他',
+]
 
 /** 语境 → 分类的关键词表（判断要不要发表情、发哪一类；纯本地匹配，不耗 token）。 */
 const EMOTION_HINTS = [
-  ['开心', ['开心', '高兴', '笑', '哈哈', '好耶', '太棒', 'nice', 'happy', 'joy', 'laugh', '嘿嘿']],
-  ['难过', ['难过', '哭', '伤心', '委屈', '失落', 'sad', 'cry', '呜呜']],
-  ['生气', ['生气', '气死', '怒', '火大', '烦', 'angry', 'mad', '哼']],
-  ['惊讶', ['惊讶', '震惊', '惊', '哇', '卧槽', 'wow', 'surprise']],
-  ['爱你', ['爱你', '喜欢', '亲亲', '抱抱', '贴贴', 'love', 'heart', '❤']],
-  ['无语', ['无语', '尴尬', '汗', '服了', 'speechless', 'what']],
-  ['摸鱼', ['摸鱼', '累', '困', '睡', '躺', 'tired', 'sleep', 'zzz', '下班']],
-  ['加油', ['加油', '冲', '努力', '棒', 'fight', 'go', '可以的']],
+  ['开心', ['开心', '高兴', '愉快', '好耶', '不错', '开森', 'happy', 'joy']],
+  ['大笑', ['哈哈', '笑死', '哈哈哈', '搞笑', '笑疯', 'laugh', 'lol', '233']],
+  ['得意', ['得意', '骄傲', '牛', '厉害', '稳了', '拿捏', 'pro']],
+  ['害羞', ['害羞', '脸红', '不好意思', '羞', 'shy']],
+  ['爱你', ['爱你', '喜欢你', 'love', 'heart', '❤', '比心', '爱你哟']],
+  ['亲亲', ['亲亲', 'mua', '啵啵', 'kiss', '亲一口']],
+  ['抱抱', ['抱抱', '抱一下', '抱抱你', 'hug', '贴贴']],
+  ['感谢', ['谢谢', '感谢', '多谢', 'thank', '3q']],
+  ['庆祝', ['庆祝', '恭喜', '生日快乐', 'party', '🎉', '干杯']],
+  ['加油', ['加油', '努力', 'fighting', '给力', '棒']],
+  ['冲鸭', ['冲', '冲鸭', '上吧', 'go', '可以的']],
+  ['摸鱼', ['摸鱼', '划水', '偷懒', '上班', '下班']],
+  ['困', ['困', '睡', '晚安', 'zzz', 'tired', 'sleep', '眯一会']],
+  ['难过', ['难过', '伤心', '失落', '难受', 'sad', 'blue']],
+  ['委屈', ['委屈', '冤枉', '欺负', '呜呜', '想哭']],
+  ['哭', ['哭', '泪', '大哭', 'cry', '😭', '泪目']],
+  ['生气', ['生气', '愤怒', '气死', '烦', 'angry', 'mad', '哼']],
+  ['发火', ['发火', '火大', '爆炸', '怒', '吼', 'rage']],
+  ['无语', ['无语', '服了', 'speechless', 'what', '离谱']],
+  ['尴尬', ['尴尬', '汗', '囧', 'embarrass', '社死']],
+  ['惊讶', ['惊讶', '惊了', '没想到', '哇', 'wow', 'surprise']],
+  ['震惊', ['震惊', '震惊了', '卧槽', 'shock', '吓人']],
+  ['害怕', ['害怕', '吓', '恐怖', 'fear', 'scared', '不敢']],
+  ['安慰', ['安慰', '别难过', '抱抱你', '没事的', 'cheer up', 'hug you']],
 ]
 
 /**
@@ -541,7 +561,6 @@ const WECHAT_COMMANDS = new Set([
   'find',
   'approval',
   'policy',
-  'sticker',
   'emotion',
   'ping',
   'health',
@@ -569,8 +588,7 @@ const WECHAT_HELP_TEXT = [
   '/model 2   切换模型（可带推理档：/model 2 high）',
   '/status    会话状态（模型 / 运行 / 队列）',
   '/approval ask|never  审批策略',
-  '/sticker   随机发一张表情包（/sticker 关键词 可筛，/sticker 列表 看目录）',
-  '/emotion   表情包库：add / end / list / send / rename / delete / other source true|false',
+  '/emotion   表情包库：add / end / list / send / rename / note / other source true|false',
   '/ping      检查微信连接是否正常（轮询 / 错误 / 镜像 / 待补发）',
   '/resend    立刻补发队列里没发出去的回复',
   '/suggest <内容>  把你的需求提交成 GitHub issue',
@@ -598,7 +616,8 @@ const EMOTION_HELP_TEXT = [
   '/emotion end / cancel  结束或取消收录',
   '/emotion list [分类]  查看已收录（不填分类看各分类数量）',
   '/emotion send [分类|名字]  手动发 1–2 张',
-  '/emotion rename 旧名 新名   重命名',
+  '/emotion rename 旧名 新名 [备注]   重命名（备注会拼进文件名）',
+  '/emotion note 名字 备注      给表情包加备注（重命名文件）',
   '/emotion delete 名字       删除',
   '/emotion other source true|false  是否允许外来表情包（默认 false）',
   `分类：${EMOTION_CATEGORIES.join(' / ')}`,
@@ -955,7 +974,7 @@ function formatTokens(value) {
 const DEFAULT_CUTE_POOL = ['🌊', '🐳', '✨', '😊', '🫧', '🎵', '🌸', '🐱', '🫶', '☕']
 
 /** 表情包目录里认的图片扩展名。 */
-const STICKER_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp'])
+const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp'])
 
 /**
  * 给回复句尾加一个可爱 emoji/颜文字。
@@ -975,40 +994,6 @@ function decorateReply(text, options = {}) {
   if (level !== 'always' && random() > 0.5) return value
   const index = Math.min(pool.length - 1, Math.floor(random() * pool.length))
   return `${trimmed} ${pool[Math.max(0, index)]}`
-}
-
-/**
- * 列出一个目录里的表情包文件（png/jpg/jpeg/gif/webp）。
- * @param {string} dir 目录
- * @returns {string[]} 绝对路径，按文件名排序
- */
-function listStickers(dir) {
-  try {
-    return fs
-      .readdirSync(dir)
-      .filter((name) => STICKER_EXTS.has(path.extname(name).toLowerCase()))
-      .map((name) => path.join(dir, name))
-      .sort()
-  } catch {
-    return []
-  }
-}
-
-/**
- * 按关键词挑一张表情包。
- * @param {string} dir 目录
- * @param {string} [keyword] 文件名包含的关键词
- * @returns {{ stickers: string[], picked: string | null }} 匹配集合与抽中的文件
- */
-function pickSticker(dir, keyword) {
-  const all = listStickers(dir)
-  if (all.length === 0) return { stickers: [], picked: null }
-  const matched = keyword
-    ? all.filter((file) => path.basename(file).toLowerCase().includes(String(keyword).toLowerCase()))
-    : all
-  if (matched.length === 0) return { stickers: all, picked: null }
-  const index = Math.floor(Math.random() * matched.length)
-  return { stickers: matched, picked: matched[Math.min(index, matched.length - 1)] }
 }
 
 // ---------------------------------------------------------------------------
@@ -1058,11 +1043,6 @@ function normalizeConfig(raw) {
     // 微信里等不到回复时：skip = 直接跳过（选项卡标未作答 / 审批按拒绝）继续这一轮；
     // handoff = 交还电脑端弹卡（没人守在电脑旁时会一直等）
     optionTimeoutMode: c.optionTimeoutMode === 'handoff' ? 'handoff' : 'skip',
-    // 表情包目录：/sticker 从这里随机发一张图片或 GIF
-    stickerDir:
-      typeof c.stickerDir === 'string' && c.stickerDir.trim()
-        ? c.stickerDir.trim()
-        : path.join(os.homedir(), '.dsh', 'wechat-stickers'),
     // 可爱化回复：off / subtle（约一半）/ always（每条）
     cuteLevel: ['off', 'subtle', 'always'].includes(String(c.cuteLevel)) ? String(c.cuteLevel) : 'subtle',
     cutePool:
@@ -1074,6 +1054,8 @@ function normalizeConfig(raw) {
       typeof c.emotionDir === 'string' && c.emotionDir.trim()
         ? c.emotionDir.trim()
         : path.join(os.homedir(), '.dsh', 'wechat-emotions'),
+    // 首次启动把旧 wechat-stickers 迁进 emotion 库（默认开）
+    migrateLegacyStickers: c.migrateLegacyStickers !== false,
     // 自动表情：off 不发 / subtle 语境够强才发 / always 命中就发
     emotionAuto: ['off', 'subtle', 'always'].includes(String(c.emotionAuto)) ? String(c.emotionAuto) : 'subtle',
     // subtle 档需要的语境分数（用户命中 2 分、助手命中 1 分）
@@ -3046,14 +3028,14 @@ function createChannel(ctx, config) {
     return dir
   }
 
-  /** 启动时：建好 9 个分类目录，把目录里手工放进来的图片补进索引（视为用户自己的收藏）。 */
+  /** 启动时：建好全部分类目录，把目录里手工放进来的图片补进索引（视为用户自己的收藏）。 */
   function syncEmotions() {
     loadEmotions()
     for (const category of EMOTION_CATEGORIES) {
       const dir = emotionCategoryDir(category)
       let files = []
       try {
-        files = fs.readdirSync(dir).filter((name) => STICKER_EXTS.has(path.extname(name).toLowerCase()))
+        files = fs.readdirSync(dir).filter((name) => IMAGE_EXTS.has(path.extname(name).toLowerCase()))
       } catch {
         files = []
       }
@@ -3064,6 +3046,7 @@ function createChannel(ctx, config) {
           file: rel,
           category,
           name: name.replace(/\.[^.]+$/, ''),
+          note: '',
           source: 'user',
           addedAt: Date.now(),
           bytes: 0,
@@ -3071,6 +3054,39 @@ function createChannel(ctx, config) {
       }
     }
     saveEmotions()
+  }
+
+  /**
+   * 一次性把旧版 `~/.dsh/wechat-stickers` 里的图片迁进 emotion 库（保留原目录，不删除文件）。
+   * 迁移后旧目录不再被读取；`/sticker` 命令也已移除，统一用 `/emotion`。
+   */
+  function migrateLegacyStickers() {
+    if (!config.migrateLegacyStickers) return
+    if (state.settings?.emotionLegacyMigrated === true) return
+    const legacyDir = path.join(os.homedir(), '.dsh', 'wechat-stickers')
+    let files = []
+    try {
+      files = fs.readdirSync(legacyDir).filter((name) => IMAGE_EXTS.has(path.extname(name).toLowerCase()))
+    } catch {
+      files = []
+    }
+    let migrated = 0
+    for (const name of files) {
+      try {
+        const buffer = fs.readFileSync(path.join(legacyDir, name))
+        saveEmotionBuffer(buffer, path.extname(name).toLowerCase(), {
+          category: '其他',
+          source: 'user',
+          name: name.replace(/\.[^.]+$/, ''),
+        })
+        migrated += 1
+      } catch (err) {
+        log('warn', 'legacy sticker migrate failed', { file: name, error: String(err?.message ?? err) })
+      }
+    }
+    state.settings = { ...(state.settings ?? {}), emotionLegacyMigrated: true }
+    saveState(true)
+    if (migrated > 0) log('info', 'legacy stickers migrated', { migrated, from: legacyDir })
   }
 
   /** 正在采集表情包时，是否允许用「外来」来源（默认只允许用户自己收藏）。 */
@@ -3103,6 +3119,7 @@ function createChannel(ctx, config) {
       file: rel,
       category,
       name: file.replace(/\.[^.]+$/, ''),
+      note: '',
       source: options.source === 'builtin' ? 'builtin' : 'user',
       addedAt: Date.now(),
       bytes: buffer.length,
@@ -3132,14 +3149,22 @@ function createChannel(ctx, config) {
     )
   }
 
-  /** 重命名一张表情包（文件 + 索引一起改）。 */
-  function renameEmotion(oldName, newName) {
+  /**
+   * 重命名一张表情包（文件 + 索引一起改），可顺便加备注（备注会拼进文件名）。
+   * @param {string} oldName 旧名字
+   * @param {string} newName 新名字
+   * @param {string} [note] 备注；不传则保留原备注，传空串则清空
+   * @returns {{ ok: boolean, entry?: object, message?: string }}
+   */
+  function renameEmotion(oldName, newName, note) {
     const entry = findEmotionEntry(oldName)
     if (!entry) return { ok: false, message: `没找到表情包「${oldName}」` }
     const category = entry.category
     const dir = emotionCategoryDir(category)
     const ext = path.extname(entry.file) || '.png'
-    const stem = sanitizeEmotionStem(newName)
+    const base = sanitizeEmotionStem(newName || entry.name)
+    const cleanNote = note === undefined ? String(entry.note ?? '') : sanitizeEmotionStem(note, '')
+    const stem = cleanNote ? `${base}_${cleanNote}` : base
     let file = `${stem}${ext}`
     let index = 2
     while (fs.existsSync(path.join(dir, file))) {
@@ -3153,7 +3178,12 @@ function createChannel(ctx, config) {
     }
     delete emotionIndex.stickers[entry.file]
     const rel = `${category}/${file}`
-    emotionIndex.stickers[rel] = { ...entry, file: rel, name: file.replace(/\.[^.]+$/, '') }
+    emotionIndex.stickers[rel] = {
+      ...entry,
+      file: rel,
+      name: file.replace(/\.[^.]+$/, ''),
+      note: cleanNote,
+    }
     saveEmotions()
     return { ok: true, entry: emotionIndex.stickers[rel] }
   }
@@ -3712,45 +3742,6 @@ function createChannel(ctx, config) {
       await replyText(binding, lines.join('\n'))
       return true
     }
-    if (name === 'sticker') {
-      const args = command.args.trim()
-      if (/^(list|列表)$/i.test(args)) {
-        const files = listStickers(config.stickerDir)
-        if (files.length === 0) {
-          await replyText(binding, `（还没有表情包：把 png / jpg / gif / webp 放进 ${config.stickerDir}，再发 /sticker）`)
-          return true
-        }
-        const names = files.slice(0, 30).map((file) => path.basename(file).replace(/\.[^.]+$/, ''))
-        await replyText(
-          binding,
-          `🖼 表情包 ${files.length} 张：\n${names.join('、')}\n发 /sticker 随机，/sticker 关键词 按文件名筛。`,
-        )
-        return true
-      }
-      const { stickers, picked } = pickSticker(config.stickerDir, args)
-      if (stickers.length === 0) {
-        await replyText(binding, `（还没有表情包：把 png / jpg / gif / webp 放进 ${config.stickerDir}，再发 /sticker）`)
-        return true
-      }
-      if (!picked) {
-        const names = stickers.slice(0, 12).map((file) => path.basename(file).replace(/\.[^.]+$/, ''))
-        await replyText(binding, `没有匹配「${args}」的表情包，现有：\n${names.join('、')}`)
-        return true
-      }
-      try {
-        const target = binding.toUserId || String(binding.chatId).replace(/^user:/, '')
-        await sendMediaToChat({
-          accountId: binding.accountId,
-          toUserId: target,
-          contextToken: binding.contextToken ?? '',
-          filePath: picked,
-        })
-        log('info', 'sticker sent', { key: binding.key, file: path.basename(picked) })
-      } catch (err) {
-        await replyText(binding, `⚠️ 表情包发送失败：${String(err?.message ?? err)}`)
-      }
-      return true
-    }
     if (name === 'models') {
       const catalog = await modelCatalogOf()
       const flat = flattenModelCatalog(catalog)
@@ -4259,13 +4250,36 @@ function createChannel(ctx, config) {
       }
       if (sub === 'rename' || sub === '重命名') {
         const oldName = parts[1]
-        const newName = parts.slice(2).join(' ')
-        if (!oldName || !newName) {
-          await replyText(binding, '用法：/emotion rename 旧名 新名')
+        const rest = parts.slice(2).join(' ')
+        if (!oldName || !rest) {
+          await replyText(binding, '用法：/emotion rename 旧名 新名 [备注]')
           return true
         }
-        const result = renameEmotion(oldName, newName)
+        const space = rest.indexOf(' ')
+        const newName = space >= 0 ? rest.slice(0, space) : rest
+        const note = space >= 0 ? rest.slice(space + 1).trim() : undefined
+        const result = renameEmotion(oldName, newName, note)
         await replyText(binding, result.ok ? `✅ 已重命名为「${result.entry.name}」` : `⚠️ ${result.message}`)
+        return true
+      }
+      if (sub === 'note' || sub === '备注') {
+        const name = parts[1]
+        const note = parts.slice(2).join(' ').trim()
+        if (!name || !note) {
+          await replyText(binding, '用法：/emotion note 名字 备注')
+          return true
+        }
+        const entry = findEmotionEntry(name)
+        if (!entry) {
+          await replyText(binding, `没找到表情包「${name}」`)
+          return true
+        }
+        const base =
+          entry.note && String(entry.name).endsWith(`_${entry.note}`)
+            ? String(entry.name).slice(0, -(String(entry.note).length + 1))
+            : String(entry.name)
+        const result = renameEmotion(name, base, note)
+        await replyText(binding, result.ok ? `✅ 已加备注「${result.entry.name}」` : `⚠️ ${result.message}`)
         return true
       }
       if (sub === 'delete' || sub === 'rm' || sub === '删除') {
@@ -5406,23 +5420,6 @@ function createChannel(ctx, config) {
 
   // -- 生命周期 ------------------------------------------------------------
 
-  /** 表情包目录不存在就建一个，并放一份说明。 */
-  function ensureStickerDir() {
-    try {
-      fs.mkdirSync(config.stickerDir, { recursive: true })
-      const note = path.join(config.stickerDir, 'README.txt')
-      if (!fs.existsSync(note)) {
-        fs.writeFileSync(
-          note,
-          '把 png / jpg / gif / webp 表情包放在这个目录。\n微信里发 /sticker 随机发一张，/sticker 关键词 按文件名筛，/sticker 列表 看全部。\n',
-          'utf8',
-        )
-      }
-    } catch (err) {
-      log('warn', 'sticker dir unavailable', { dir: config.stickerDir, error: String(err?.message ?? err) })
-    }
-  }
-
   function start() {
     // 热重载可能留下旧实例：同一 stateDir 只允许一个活跃 channel，先把旧的停掉
     const previous = CHANNEL_REGISTRY.get(config.stateDir)
@@ -5442,8 +5439,8 @@ function createChannel(ctx, config) {
     loadState()
     applyFeatureOverrides()
     loadQuotes()
-    ensureStickerDir()
     syncEmotions()
+    migrateLegacyStickers()
     for (const account of accounts()) startMonitor(account.id)
     startMirror()
     startProgress()
@@ -6117,8 +6114,6 @@ export const __test = {
   segmentText,
   splitByLength,
   decorateReply,
-  listStickers,
-  pickSticker,
   normalizeConfig,
   createChannel,
 }

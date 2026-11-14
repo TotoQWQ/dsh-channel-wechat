@@ -98,6 +98,7 @@ const config = {
   ...normalizeConfig({ stateDir, emotionDir, emotionAuto: 'subtle', emotionThreshold: 2, emotionCooldownMs: 300000 }),
   progressHeartbeat: false,
   replyTimeoutMs: 5000,
+  migrateLegacyStickers: false,
 }
 const channel = createChannel(ctx, config)
 channel.start()
@@ -124,11 +125,13 @@ const check = async (name, fn) => {
 
 try {
   await check('语境分类与打分（纯本地不耗 token）', async () => {
-    assert.equal(guessEmotionCategory('哈哈太好笑了'), '开心')
+    assert.equal(guessEmotionCategory('哈哈太好笑了'), '大笑')
     assert.equal(guessEmotionCategory('好难过想哭'), '难过')
-    assert.equal(guessEmotionCategory('今天天气不错'), null)
-    assert.deepEqual(emotionContextScore('哈哈', '好耶'), { category: '开心', score: 3 })
-    assert.deepEqual(emotionContextScore('谢谢', '不客气'), null)
+    assert.equal(guessEmotionCategory('今天好困想睡'), '困')
+    assert.equal(guessEmotionCategory('今天星期一'), null)
+    assert.deepEqual(emotionContextScore('哈哈', '好耶'), { category: '大笑', score: 2 })
+    assert.deepEqual(emotionContextScore('谢谢', '不客气'), { category: '感谢', score: 2 })
+    assert.deepEqual(emotionContextScore('今天星期一', '收到'), null)
     assert.equal(sanitizeEmotionStem('a/b c.png'), 'a_b_c')
   })
 
@@ -167,15 +170,22 @@ try {
     assert.doesNotMatch(lastReply(), /内置/, '默认不列外来来源')
   })
 
-  await check('/emotion rename / delete', async () => {
+  await check('/emotion rename / note / delete', async () => {
     reset()
     await inbound('/emotion rename haha 笑死', 'm-5')
     assert.match(lastReply(), /已重命名为「笑死」/)
     assert.ok(fs.existsSync(path.join(emotionDir, '开心', '笑死.png')))
     reset()
-    await inbound('/emotion delete 笑死', 'm-6')
-    assert.match(lastReply(), /已删除「笑死」/)
-    assert.ok(!fs.existsSync(path.join(emotionDir, '开心', '笑死.png')))
+    await inbound('/emotion note 笑死 可爱', 'm-5b')
+    assert.match(lastReply(), /已加备注「笑死_可爱」/)
+    assert.ok(fs.existsSync(path.join(emotionDir, '开心', '笑死_可爱.png')))
+    const index = JSON.parse(fs.readFileSync(path.join(emotionDir, 'index.json'), 'utf8'))
+    const noted = Object.values(index.stickers).find((item) => item.note === '可爱')
+    assert.ok(noted, '索引里应有备注')
+    reset()
+    await inbound('/emotion delete 笑死_可爱', 'm-6')
+    assert.match(lastReply(), /已删除「笑死_可爱」/)
+    assert.ok(!fs.existsSync(path.join(emotionDir, '开心', '笑死_可爱.png')))
   })
 
   await check('/emotion other source true 后才允许外来来源', async () => {
@@ -199,10 +209,10 @@ try {
 
   await check('maybeSendEmotions：命中语境发 1–2 张，冷却内不再发', async () => {
     reset()
-    const first = await channel.maybeSendEmotions(bindingKey, '哈哈太搞笑了', '好耶')
+    const first = await channel.maybeSendEmotions(bindingKey, '今天很开心', '好耶')
     assert.ok(first.sent >= 1 && first.sent <= 2)
     assert.equal(items.length, first.sent)
-    const second = await channel.maybeSendEmotions(bindingKey, '哈哈', '好耶')
+    const second = await channel.maybeSendEmotions(bindingKey, '今天很开心', '好耶')
     assert.equal(second.sent, 0)
     assert.equal(second.reason, 'cooldown')
   })

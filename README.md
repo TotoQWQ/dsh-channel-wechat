@@ -28,8 +28,8 @@
 - **微信里切换会话**：在微信里发 `/sessions` 看最近会话列表，`/use 2` 切到第 2 个，`/new` 开新会话，`/current` 看当前绑定；不在这几个命令里的 `/xxx` 照常发给会话。切换立即生效（不改电脑端任何东西），下一轮就发到新会话。
 - **微信里换模型 / 看状态 / 停任务**：`/models` 列可用模型（标当前/默认、推理档），`/model 2`（或 `/model 2 high`、`/model provider/modelId`）切换会话模型；`/status` 看运行状态、队列与待输入；`/stop` 停掉当前这一轮。
 - **微信里整理会话**：`/rename 标题` 给会话改名；`/history 6` 回看最近几条对话；`/search 关键词` 跨会话搜历史，搜到的序号可直接 `/use` 切过去；`/approval ask|never` 看/切当前会话的审批策略。
-- **卖萌**：`/sticker` 从 `~/.dsh/wechat-stickers/` 随机发一张表情包（`/sticker 关键词` 按文件名筛、`/sticker 列表` 看全部）；`cuteLevel` 控制助手回复句尾是否自动带一个 emoji/颜文字（默认 `subtle`，约一半回复带）。
-- **表情包库 `/emotion`**：独立目录 `~/.dsh/wechat-emotions/`，按 9 个分类（开心/难过/生气/惊讶/爱你/无语/摸鱼/加油/其他）存放图片与 GIF，带索引和重命名；`/emotion add [分类]` 开始收录、接着发图、`/emotion end` 结束；`/emotion list / send / rename / delete` 管理；`/emotion other source true|false` 控制是否允许外来来源（默认 false，只用用户自己收录的）。发送前按语境做**本地关键词打分**（用户命中 2 分、助手回复命中 1 分），够分才发、每次最多 2 张、带冷却——全程不耗 token。
+- **卖萌**：`cuteLevel` 控制助手回复句尾是否自动带一个 emoji/颜文字（默认 `subtle`，约一半回复带）；旧版 `/sticker` 与 `~/.dsh/wechat-stickers` 已废弃，统一用 `/emotion`。
+- **表情包库 `/emotion`**：独立目录 `~/.dsh/wechat-emotions/`，按 **25 个细分分类**（开心/大笑/得意/害羞/爱你/亲亲/抱抱/感谢/庆祝/加油/冲鸭/摸鱼/困/难过/委屈/哭/生气/发火/无语/尴尬/惊讶/震惊/害怕/安慰/其他）存放图片与 GIF，带索引、重命名和备注；`/emotion add [分类]` 开始收录、接着发图、`/emotion end` 结束；`/emotion note 名字 备注` 会把备注拼进文件名；`/emotion other source true|false` 控制是否允许外来来源（默认 false）；发送前按语境做**本地关键词打分**（用户命中 2 分、助手回复命中 1 分），够分才发、每次最多 2 张、带冷却——全程不耗 token。启动时会把旧 `wechat-stickers` 里的图片一次性迁到「其他」（记为内置来源，原目录保留）。
 - **思考片段摘要**（默认关，面板可开）：模型边想边把推理增量压成一句「💭 思考中：…」发到微信（本地截取、去代码块、按句号/上限截断，**不调模型不耗 token**）；同一会话默认 30 秒最多一条，`turn/end` 清空缓冲。
 - **断联检测**：`/ping`（或 `/health`）在微信里直接查连接：每个账号是否在轮询、最近一次成功轮询多久前、最近错误、镜像与绑定数；snapshot 增加 `health` 供面板显示「连接正常/异常」。后台每 30 秒检查一次，长轮询超过 `healthStaleMs`（默认 120 秒）没成功就自动重启该账号的 monitor（记录 `staleRestarts`），不用手动重扫码；`healthCheck: false` 可关自动重启。
 - **分段发送**（微信不支持流式，只能整段分条发）：长回复按空行段落切分、能合并的段合并、超长段再按句号/长度切，默认每条不超过 `segmentMaxChars`（0 = 用 `maxReplyChars`），相邻条之间隔 `segmentDelayMs`（默认 500ms）；可选 `segmentIndex: true` 加「（1/3）」序号；`segmentMode: length` 可回到旧的纯长度切分。
@@ -109,8 +109,7 @@ plugin_manager: install_bundle  target=<本目录的绝对路径>
 | `/history 6`（`/hist`） | 看当前会话最近 N 条对话（默认 6，最多 20，每条截断 140 字） |
 | `/search 关键词`（`/find`） | 跨会话搜历史，列出命中的会话与片段，序号可直接 `/use` 切过去 |
 | `/approval`（`/policy`） | 看当前审批策略；`/approval ask` 需要时询问，`/approval never` 需要审批的操作直接拒绝 |
-| `/sticker` | 从表情包目录随机发一张图片/GIF；`/sticker 关键词` 按文件名筛；`/sticker 列表` 看目录内容 |
-| `/emotion` | 表情包库：`add [分类]` / `end` / `cancel` / `list [分类]` / `send [分类\|名字]` / `rename 旧 新` / `delete 名字` / `other source true\|false` |
+| `/emotion` | 表情包库：`add [分类]` / `end` / `cancel` / `list [分类]` / `send [分类\|名字]` / `rename 旧 新 [备注]` / `note 名字 备注` / `delete 名字` / `other source true\|false` |
 | `/ping`（`/health`） | 检查微信连接：账号是否在轮询、最近一次成功轮询多久前、最近错误、镜像与绑定数 |
 | `/resend` | 立刻补发队列里没发出去的回复（发送失败自动入队，最多保留 6 小时） |
 | `/suggest <内容>` | 把需求提交成 GitHub issue，成功后回复链接 |
@@ -153,10 +152,10 @@ plugin_manager: install_bundle  target=<本目录的绝对路径>
 | `progressHeartbeat` | `true` | 一轮跑得久时在微信里定期报进度（已思考多久） |
 | `progressIntervalMs` | `120000` | 进度提示间隔，最短 30000 |
 | `insertWhileBusy` | `true` | 会话在跑时把微信消息插进当前对话（steer）而不是排队等待 |
-| `stickerDir` | `''` | 表情包目录，空 = `~/.dsh/wechat-stickers` |
 | `cuteLevel` | `subtle` | 回复句尾加 emoji 的强度：`off` / `subtle`（约一半）/ `always` |
 | `cutePool` | 内置 10 个 | 可爱化回复用的 emoji / 颜文字池 |
-| `emotionDir` | `''` | 表情包库目录，空 = `~/.dsh/wechat-emotions`（启动时建 9 个分类目录） |
+| `emotionDir` | `''` | 表情包库目录，空 = `~/.dsh/wechat-emotions`（启动时建 25 个分类目录） |
+| `migrateLegacyStickers` | `true` | 首次启动把旧 `~/.dsh/wechat-stickers` 迁到 emotion「其他」（原目录保留） |
 | `emotionAuto` | `subtle` | 自动表情：`off` / `subtle`（语境够强）/ `always`（命中就发） |
 | `emotionThreshold` | `2` | `subtle` 档的语境分数门槛（用户命中 2 分、助手命中 1 分） |
 | `emotionCooldownMs` | `300000` | 同一聊天自动发表情的冷却 |
