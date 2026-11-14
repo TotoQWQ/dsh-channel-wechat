@@ -174,6 +174,27 @@ try {
     const fileCandidates = report.candidates.filter((item) => item.kind === 'file')
     assert.ok(fileCandidates.some((item) => String(item.error ?? '').includes('超过')), JSON.stringify(fileCandidates))
   })
+
+  await check('微信轮次（runTurn）的文件也会补发', async () => {
+    reset()
+    const pathFile = path.join(root, 'turn-output.png')
+    fs.writeFileSync(pathFile, Buffer.from([0x89, 0x50, 0x4e, 0x47, 9, 9, 9]))
+    currentEvents = [
+      { type: 'assistant/message', seq: 20, time: Date.now(), data: { message: { blocks: [{ type: 'text', text: `生成的文件：${pathFile}` }] } } },
+    ]
+    liveSession.seq = 21
+    const turnBinding = {
+      key: `${accountId}::${chatId}`,
+      accountId,
+      chatId,
+      toUserId: chatId.replace(/^user:/, ''),
+      sessionId,
+      contextToken: 'ctx-token',
+    }
+    const sentFiles = await channel.forwardTurnFiles(turnBinding, sessionId, 20)
+    assert.equal(sentFiles, 1)
+    assert.equal(items.filter((item) => item.type === 2).length, 1)
+  })
 } finally {
   channel.stop()
   server.closeAllConnections?.()

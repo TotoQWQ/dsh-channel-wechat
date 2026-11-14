@@ -37,8 +37,8 @@ const ILINK_APP_ID = 'bot'
 /** 0x000MMNNPP：与官方 2.4.10 对齐 */
 const ILINK_APP_CLIENT_VERSION = (2 << 16) | (4 << 8) | 10
 /** 插件版本：与 package.json 保持一致，出现在 base_info.channel_version 里 */
-const CHANNEL_VERSION = '2.18.0'
-const BOT_AGENT = 'DSH-WeChat/2.18.0'
+const CHANNEL_VERSION = '2.18.1'
+const BOT_AGENT = 'DSH-WeChat/2.18.1'
 /** 媒体 CDN（官方 getUploadUrl 没返回 upload_full_url 时用它拼上传地址） */
 const CDN_BASE = 'https://novac2c.cdn.weixin.qq.com/c2c'
 
@@ -2757,6 +2757,13 @@ function createChannel(ctx, config) {
           log('warn', 'emotion auto failed', { key: binding.key, error: String(err?.message ?? err) })
         }
       }
+      // 微信轮次的助手消息不经过 mirror，这里补发本轮产出的文件
+      try {
+        const files = await forwardTurnFiles(binding, sessionId, baseline)
+        if (files > 0) log('info', 'turn files forwarded', { key: binding.key, files })
+      } catch (err) {
+        log('warn', 'turn file forward failed', { key: binding.key, error: String(err?.message ?? err) })
+      }
       return { sessionId, reply: decorated || reply }
     } finally {
       endWechatTurn(sessionId)
@@ -4980,6 +4987,36 @@ function createChannel(ctx, config) {
     return sent
   }
 
+  /**
+   * 微信发起的轮次不走 mirrorTick（runTurn 会直接把回复发出去并推进 lastSeq），
+   * 这里补一次：扫描本轮助手消息里的文件并转发。
+   * @returns {Promise<number>} 发送的文件数
+   */
+  async function forwardTurnFiles(binding, sessionId, fromSeq) {
+    if (!config.mirrorFiles) return 0
+    const session = ctx.get('sessions')?.get?.(sessionId)
+    if (!session) return 0
+    let events = []
+    try {
+      events = session.snapshotEvents(fromSeq, session.seq) ?? []
+    } catch {
+      return 0
+    }
+    let cwd = ''
+    try {
+      cwd = String(ctx.get('workingDirectory')?.get?.(session) ?? '')
+    } catch {
+      cwd = ''
+    }
+    let sent = 0
+    for (const event of events) {
+      if (event?.type !== 'assistant/message') continue
+      const text = textOfMessage(event.data?.message)
+      sent += await mirrorEventFiles(binding, event, text, cwd, [], true)
+    }
+    return sent
+  }
+
   async function scanAndMirror(binding, from, to, options = {}) {
     const send = options.send === true
     const session = ctx.get('sessions')?.get?.(binding.sessionId)
@@ -5469,6 +5506,7 @@ function createChannel(ctx, config) {
     sendPauseRemaining,
     mirrorTick,
     scanAndMirror,
+    forwardTurnFiles,
     collectTextFilePaths,
     collectAttachmentRefs,
     flushPending,
