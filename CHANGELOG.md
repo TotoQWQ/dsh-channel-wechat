@@ -6,6 +6,22 @@
 
 ---
 
+## 2.20.0 — 2026-11-15
+
+### 新增
+
+- **上传后由 DSH 亲自识别分类**：`/emotion add` 期间收到的图片，先交给 Host `llm` 服务（默认模型，带 `image` block）判断最贴切的分类，再落到对应目录；模型失败/不支持图片时才用 add 指定的分类兜底。
+  - 新增 `classifyEmotionBuffer()`：`attachments.saveImage` 存图 → `llm.stream` 只回分类名 → 匹配 25 分类之一；
+  - 20 秒超时；每次上传会产生一次很小的模型调用（`emotionAutoClassify: false` 可关）；
+  - `/emotion add` 的回复会提示“DSH 亲自看图识别分类”；收录结果按实际分类汇总。
+- `test-emotion.mjs` 增加模型识别与关闭开关两项（11 项）。
+
+### 变更
+
+- 版本 2.19.1 → 2.20.0（`CHANNEL_VERSION` / `bot_agent` 同步）。
+
+---
+
 ## 2.19.1 — 2026-11-15
 
 ### 修复

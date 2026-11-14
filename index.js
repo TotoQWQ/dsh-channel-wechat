@@ -37,8 +37,8 @@ const ILINK_APP_ID = 'bot'
 /** 0x000MMNNPP：与官方 2.4.10 对齐 */
 const ILINK_APP_CLIENT_VERSION = (2 << 16) | (4 << 8) | 10
 /** 插件版本：与 package.json 保持一致，出现在 base_info.channel_version 里 */
-const CHANNEL_VERSION = '2.19.1'
-const BOT_AGENT = 'DSH-WeChat/2.19.1'
+const CHANNEL_VERSION = '2.20.0'
+const BOT_AGENT = 'DSH-WeChat/2.20.0'
 /** 媒体 CDN（官方 getUploadUrl 没返回 upload_full_url 时用它拼上传地址） */
 const CDN_BASE = 'https://novac2c.cdn.weixin.qq.com/c2c'
 
@@ -1056,6 +1056,8 @@ function normalizeConfig(raw) {
         : path.join(os.homedir(), '.dsh', 'wechat-emotions'),
     // 首次启动把旧 wechat-stickers 迁进 emotion 库（默认开）
     migrateLegacyStickers: c.migrateLegacyStickers !== false,
+    // 用户上传表情包后由 DSH 模型亲自看图识别分类（默认开；会消耗少量 token）
+    emotionAutoClassify: c.emotionAutoClassify !== false,
     // 自动表情：off 不发 / subtle 语境够强才发 / always 命中就发
     emotionAuto: ['off', 'subtle', 'always'].includes(String(c.emotionAuto)) ? String(c.emotionAuto) : 'subtle',
     // subtle 档需要的语境分数（用户命中 2 分、助手命中 1 分）
@@ -3089,6 +3091,70 @@ function createChannel(ctx, config) {
     if (migrated > 0) log('info', 'legacy stickers migrated', { migrated, from: legacyDir })
   }
 
+  /**
+   * 让 DSH 的模型亲自看这张表情包并归到最贴切的一个分类。
+   * 走 Host `llm` 服务（默认模型），只要求模型回复分类名；失败/不支持图片时返回 null 由调用方兜底。
+   * @param {Buffer} buffer 图片内容
+   * @param {string} ext 扩展名（含点）
+   * @returns {Promise<string | null>} 分类名，未识别返回 null
+   */
+  async function classifyEmotionBuffer(buffer, ext) {
+    if (!config.emotionAutoClassify) return null
+    const llm = ctx.get('llm')
+    const attachments = ctx.get('attachments')
+    const selection = ctx.get('agentDefaultModel')?.currentSelection?.()
+    if (!llm?.stream || !attachments?.saveImage || !selection?.provider || !selection?.model) return null
+    const suffix = String(ext || '.png').toLowerCase()
+    const mediaType =
+      suffix === '.jpg' || suffix === '.jpeg'
+        ? 'image/jpeg'
+        : suffix === '.webp'
+          ? 'image/webp'
+          : suffix === '.gif'
+            ? 'image/gif'
+            : 'image/png'
+    try {
+      const ref = await attachments.saveImage({ data: new Uint8Array(buffer), mediaType })
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), 20_000)
+      const text = []
+      try {
+        const stream = llm.stream({
+          provider: selection.provider,
+          model: selection.model,
+          messages: [
+            {
+              role: 'user',
+              content: [
+                {
+                  type: 'text',
+                  text: `你是表情包分类器。请从这些分类里选一个最贴切的：${EMOTION_CATEGORIES.join('、')}。只回复分类名，不要解释。`,
+                },
+                { type: 'image', attachment: ref },
+              ],
+            },
+          ],
+          maxTokens: 12,
+          temperature: 0,
+          signal: controller.signal,
+        })
+        for await (const chunk of stream) {
+          if (chunk?.type === 'text-delta' && typeof chunk.text === 'string') text.push(chunk.text)
+          if (chunk?.type === 'finish') break
+        }
+      } finally {
+        clearTimeout(timer)
+      }
+      const answer = text.join('').trim()
+      const matched = EMOTION_CATEGORIES.find((category) => answer.includes(category))
+      if (matched) log('info', 'emotion classified', { category: matched })
+      return matched ?? null
+    } catch (err) {
+      log('warn', 'emotion classify failed', { error: String(err?.message ?? err) })
+      return null
+    }
+  }
+
   /** 正在采集表情包时，是否允许用「外来」来源（默认只允许用户自己收藏）。 */
   function allowOtherEmotionSource() {
     if (state.settings?.emotionAllowOtherSource === true) return true
@@ -3286,8 +3352,11 @@ function createChannel(ctx, config) {
         if (!media?.file) continue
         const ext = path.extname(media.file) || '.png'
         const buffer = fs.readFileSync(media.file)
+        // 让 DSH 的模型亲自看图识别分类；识别失败再用 /emotion add 指定的分类兜底
+        const recognized = await classifyEmotionBuffer(buffer, ext)
+        const finalCategory = recognized || category
         const entry = saveEmotionBuffer(buffer, ext, {
-          category,
+          category: finalCategory,
           source: 'user',
           name: media.fileName || `表情_${Date.now()}`,
         })
@@ -3303,10 +3372,15 @@ function createChannel(ctx, config) {
     }
     binding.emotionUpload = { ...upload, category, count: Number(upload.count ?? 0) + saved.length }
     saveState()
+    const counts = {}
+    for (const entry of saved) counts[entry.category] = (counts[entry.category] ?? 0) + 1
+    const summary = Object.entries(counts)
+      .map(([name, count]) => `${name} ${count}`)
+      .join('、')
     await replyText(
       binding,
       saved.length > 0
-        ? `🧸 已收录 ${saved.length} 张到「${category}」（本次共 ${binding.emotionUpload.count} 张）。继续发，或 /emotion end 结束。`
+        ? `🧸 已收录 ${saved.length} 张${summary ? `（${summary}）` : ''}（本次共 ${binding.emotionUpload.count} 张）。继续发，或 /emotion end 结束。`
         : '⚠️ 这张没存下来（下载/解密失败）。可以再发一张，或 /emotion end 结束。',
     )
     return saved.length
@@ -4171,7 +4245,7 @@ function createChannel(ctx, config) {
         saveState(true)
         await replyText(
           binding,
-          `📥 开始收录到「${category}」：接着发图片 / GIF，全部发完发 /emotion end 结束。\n分类：${EMOTION_CATEGORIES.join(' / ')}`,
+          `📥 开始收录到「${category}」：接着发图片 / GIF，DSH 会亲自看图识别分类（失败才用这个分类兜底）；全部发完发 /emotion end 结束。\n分类：${EMOTION_CATEGORIES.join(' / ')}`,
         )
         return true
       }
@@ -5523,6 +5597,7 @@ function createChannel(ctx, config) {
     maybeSendEmotions,
     emotionSummary,
     captureEmotionUpload,
+    classifyEmotionBuffer,
     waitingOptions: () => optionWaits.size,
     handleHttp,
     sendToChat,

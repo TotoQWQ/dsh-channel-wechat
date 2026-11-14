@@ -79,9 +79,31 @@ fs.writeFileSync(
 )
 
 const liveSession = { id: sessionId, seq: 0, snapshotEvents: () => [] }
+let classifyAnswer = '大笑'
+const classifyCalls = []
+const llm = {
+  stream: async function* (options) {
+    classifyCalls.push(options)
+    yield { type: 'text-delta', index: 0, text: classifyAnswer }
+    yield { type: 'finish', index: 0, reason: { kind: 'stop' } }
+  },
+}
+const attachments = {
+  saveImage: async (input) => ({
+    attachmentId: 'img-classify',
+    mediaType: input.mediaType,
+    bytes: input.data.byteLength,
+    width: 16,
+    height: 16,
+  }),
+}
+const agentDefaultModel = { currentSelection: () => ({ provider: 'test-provider', model: 'test-model' }) }
 const ctx = {
   get: (name) => {
     if (name === 'sessions') return { get: (id) => (id === sessionId ? liveSession : undefined), list: () => [liveSession] }
+    if (name === 'llm') return llm
+    if (name === 'attachments') return attachments
+    if (name === 'agentDefaultModel') return agentDefaultModel
     if (name === 'sessionController') {
       return {
         state: async () => ({ running: false, active: false, queue: [], pendingInput: [] }),
@@ -133,6 +155,25 @@ try {
     assert.deepEqual(emotionContextScore('谢谢', '不客气'), { category: '感谢', score: 2 })
     assert.deepEqual(emotionContextScore('今天星期一', '收到'), null)
     assert.equal(sanitizeEmotionStem('a/b c.png'), 'a_b_c')
+  })
+
+  await check('DSH 模型亲自识别分类（llm）', async () => {
+    classifyAnswer = '大笑'
+    classifyCalls.length = 0
+    const category = await channel.classifyEmotionBuffer(png, '.png')
+    assert.equal(category, '大笑')
+    assert.equal(classifyCalls.length, 1)
+    assert.ok(classifyCalls[0].messages[0].content.some((block) => block.type === 'image'))
+    classifyAnswer = '看不出来'
+    assert.equal(await channel.classifyEmotionBuffer(png, '.png'), null)
+  })
+
+  await check('emotionAutoClassify=false 时不做模型识别', async () => {
+    const quiet = createChannel(ctx, { ...config, emotionAutoClassify: false })
+    const before = classifyCalls.length
+    assert.equal(await quiet.classifyEmotionBuffer(png, '.png'), null)
+    assert.equal(classifyCalls.length, before)
+    quiet.stop()
   })
 
   await check('saveEmotionBuffer 按分类落盘并建索引（重名加序号）', async () => {

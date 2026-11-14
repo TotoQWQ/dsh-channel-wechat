@@ -42,6 +42,8 @@
         emotionDir: ''
         # 首次启动把旧 wechat-stickers 迁进 emotion 库（原目录保留）
         migrateLegacyStickers: true
+        # 上传表情包后由 DSH 模型亲自看图识别分类（默认开，会消耗少量 token）
+        emotionAutoClassify: true
         # 可爱化回复：off / subtle（约一半回复带一个）/ always（每条都带）
         cuteLevel: subtle
         # 可爱化回复用的 emoji / 颜文字池
