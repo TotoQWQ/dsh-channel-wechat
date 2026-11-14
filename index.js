@@ -32,8 +32,8 @@ const ILINK_APP_ID = 'bot'
 /** 0x000MMNNPP：与官方 2.4.10 对齐 */
 const ILINK_APP_CLIENT_VERSION = (2 << 16) | (4 << 8) | 10
 /** 插件版本：与 package.json 保持一致，出现在 base_info.channel_version 里 */
-const CHANNEL_VERSION = '2.11.1'
-const BOT_AGENT = 'DSH-WeChat/2.11.1'
+const CHANNEL_VERSION = '2.12.0'
+const BOT_AGENT = 'DSH-WeChat/2.12.0'
 /** 媒体 CDN（官方 getUploadUrl 没返回 upload_full_url 时用它拼上传地址） */
 const CDN_BASE = 'https://novac2c.cdn.weixin.qq.com/c2c'
 
@@ -541,6 +541,7 @@ const WECHAT_COMMANDS = new Set([
   'ping',
   'health',
   'resend',
+  'suggest',
   'help',
   '?',
 ])
@@ -563,10 +564,19 @@ const WECHAT_HELP_TEXT = [
   '/emotion   表情包库：add / end / list / send / rename / delete / other source true|false',
   '/ping      检查微信连接是否正常（轮询 / 错误 / 镜像 / 待补发）',
   '/resend    立刻补发队列里没发出去的回复',
+  '/suggest <内容>  把你的需求提交成 GitHub issue',
   '/stop      停止当前这一轮',
   '/help      这条帮助',
   '',
   '其他消息照常发给当前会话。',
+].join('\n')
+
+/** `/suggest` 的说明文本。 */
+const SUGGEST_HELP_TEXT = [
+  '💡 提交建议',
+  '用法：/suggest 一句话描述（可多行）',
+  '会把你的需求整理成 GitHub issue 提交到插件仓库，成功后回复链接。',
+  '（需要宿主在插件配置里填 GitHub token，或用环境变量 GH_TOKEN / GITHUB_TOKEN）',
 ].join('\n')
 
 /** `/emotion` 的说明文本。 */
@@ -919,6 +929,25 @@ function normalizeConfig(raw) {
       Number.isFinite(c.streamMinIntervalMs) && c.streamMinIntervalMs >= 0
         ? Math.min(60_000, Math.floor(c.streamMinIntervalMs))
         : 1500,
+    // 建议入口：/suggest 直接在仓库开 GitHub issue
+    suggestRepo:
+      typeof c.suggestRepo === 'string' && /^[^/\s]+\/[^/\s]+$/.test(c.suggestRepo.trim())
+        ? c.suggestRepo.trim()
+        : 'TotoQWQ/dsh-channel-wechat',
+    // GitHub token（留空则读环境变量 GH_TOKEN / GITHUB_TOKEN；不会写日志）
+    suggestToken: typeof c.suggestToken === 'string' ? c.suggestToken.trim() : '',
+    suggestLabels:
+      Array.isArray(c.suggestLabels) && c.suggestLabels.length > 0
+        ? c.suggestLabels.map((item) => String(item)).filter(Boolean).slice(0, 5)
+        : ['suggestion', 'from-wechat'],
+    suggestCooldownMs:
+      Number.isFinite(c.suggestCooldownMs) && c.suggestCooldownMs >= 10_000
+        ? Math.min(600_000, Math.floor(c.suggestCooldownMs))
+        : 60_000,
+    githubApiBase:
+      typeof c.githubApiBase === 'string' && c.githubApiBase.trim()
+        ? c.githubApiBase.trim().replace(/\/+$/, '')
+        : 'https://api.github.com',
     stateDir,
   }
 }
@@ -3083,6 +3112,70 @@ function createChannel(ctx, config) {
     return { sent }
   }
 
+  // -- 建议入口：/suggest 直接开 GitHub issue -------------------------------
+
+  const suggestLastAt = new Map()
+
+  /**
+   * 把一条建议提交成 GitHub issue。
+   * @param {object} binding 绑定
+   * @param {string} text 建议内容
+   * @returns {Promise<{ ok: boolean, url?: string, number?: number, message?: string }>}
+   */
+  async function createSuggestion(binding, text) {
+    const token = config.suggestToken || process.env.GH_TOKEN || process.env.GITHUB_TOKEN || ''
+    if (!token) {
+      return {
+        ok: false,
+        message: '还没有配置 GitHub token（插件配置 suggestToken，或环境变量 GH_TOKEN / GITHUB_TOKEN）',
+      }
+    }
+    const [owner, repo] = config.suggestRepo.split('/')
+    if (!owner || !repo) return { ok: false, message: `suggestRepo 配置不对：${config.suggestRepo}` }
+    const title =
+      String(text)
+        .split('\n')
+        .find((line) => line.trim())
+        ?.trim()
+        .slice(0, 80) || '来自微信的功能建议'
+    const body = [
+      '来自微信的功能建议：',
+      '',
+      String(text).trim().slice(0, 4000),
+      '',
+      '---',
+      `- chat: ${binding.chatId}`,
+      `- account: ${binding.accountId}`,
+      `- channel: ${CHANNEL_VERSION}`,
+      `- time: ${new Date().toISOString()}`,
+    ].join('\n')
+    let res
+    try {
+      res = await fetch(`${config.githubApiBase}/repos/${owner}/${repo}/issues`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/vnd.github+json',
+          'Content-Type': 'application/json',
+          'User-Agent': 'dsh-channel-wechat',
+        },
+        body: JSON.stringify({ title, body, labels: config.suggestLabels }),
+      })
+    } catch (err) {
+      return { ok: false, message: `请求 GitHub 失败：${String(err?.message ?? err)}` }
+    }
+    let json = null
+    try {
+      json = await res.json()
+    } catch {
+      json = null
+    }
+    if (!res.ok) {
+      return { ok: false, message: `GitHub 返回 ${res.status}：${String(json?.message ?? '').slice(0, 120)}` }
+    }
+    return { ok: true, url: String(json?.html_url ?? ''), number: Number(json?.number ?? 0) }
+  }
+
   async function replyText(binding, text) {
     try {
       await sendToBinding(binding, text)
@@ -3387,6 +3480,23 @@ function createChannel(ctx, config) {
           ? `✅ 已补发 ${sent} 条${left > 0 ? `，还有 ${left} 条没发出去` : ''}`
           : `⚠️ 还是发不出去（剩 ${left} 条）。让对方给机器人发一条消息刷新上下文后再试，或稍等自动重试。`,
       )
+      return true
+    }
+    if (name === 'suggest') {
+      const content = command.args.trim()
+      if (!content) {
+        await replyText(binding, SUGGEST_HELP_TEXT)
+        return true
+      }
+      const last = Number(suggestLastAt.get(binding.key) ?? 0)
+      if (Date.now() - last < config.suggestCooldownMs) {
+        const wait = Math.ceil((config.suggestCooldownMs - (Date.now() - last)) / 1000)
+        await replyText(binding, `刚提交过建议，${wait} 秒后再试。`)
+        return true
+      }
+      suggestLastAt.set(binding.key, Date.now())
+      const result = await createSuggestion(binding, content)
+      await replyText(binding, result.ok ? `✅ 建议已提交：${result.url}` : `⚠️ 提交失败：${result.message}`)
       return true
     }
     if (name === 'stop') {

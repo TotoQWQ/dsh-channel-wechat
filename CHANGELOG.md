@@ -6,6 +6,24 @@
 
 ---
 
+## 2.12.0 — 2026-11-14
+
+### 新增
+
+- **建议入口 `/suggest`**：微信里发 `/suggest <内容>`，插件直接把需求整理成 GitHub issue 提交到 `suggestRepo`（默认本仓库）：
+  - 标题取内容首行（最多 80 字），正文包含完整内容 + 聊天/账号/插件版本/时间，方便定位来源；
+  - 成功后回复 `✅ 建议已提交：<链接>`，失败回显 GitHub 状态码与消息；
+  - 同一聊天有冷却（`suggestCooldownMs`，默认 60 秒），避免重复刷 issue；
+  - token 读取顺序：`suggestToken` 配置 → `GH_TOKEN` → `GITHUB_TOKEN`；未配置时提示怎么配，不发请求；
+  - 可配 `suggestRepo`、`suggestLabels`、`githubApiBase`（测试/企业版）。
+- 新自测 `test-suggest.mjs`（5 项：成功提交与请求体、冷却、无 token、GitHub 403、无参数用法）。
+
+### 变更
+
+- 版本 2.11.1 → 2.12.0（`CHANNEL_VERSION` / `bot_agent` 同步）。
+
+---
+
 ## 2.11.1 — 2026-11-14
 
 ### 修复（全量复查）
