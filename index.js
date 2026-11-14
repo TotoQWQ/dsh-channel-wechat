@@ -37,8 +37,8 @@ const ILINK_APP_ID = 'bot'
 /** 0x000MMNNPP：与官方 2.4.10 对齐 */
 const ILINK_APP_CLIENT_VERSION = (2 << 16) | (4 << 8) | 10
 /** 插件版本：与 package.json 保持一致，出现在 base_info.channel_version 里 */
-const CHANNEL_VERSION = '2.19.0'
-const BOT_AGENT = 'DSH-WeChat/2.19.0'
+const CHANNEL_VERSION = '2.19.1'
+const BOT_AGENT = 'DSH-WeChat/2.19.1'
 /** 媒体 CDN（官方 getUploadUrl 没返回 upload_full_url 时用它拼上传地址） */
 const CDN_BASE = 'https://novac2c.cdn.weixin.qq.com/c2c'
 
@@ -4623,7 +4623,10 @@ function createChannel(ctx, config) {
       return { ok: false, message: 'HMR 服务不可用（需要 DSH 提供 hmr.reconcileProfile）' }
     }
     try {
-      const result = await hmr.reconcileProfile()
+      // reconcileProfile 必须串行在 HMR 的 runExclusive 里（否则会报 must run inside runExclusive）
+      const result = hmr.runExclusive
+        ? await hmr.runExclusive(() => hmr.reconcileProfile())
+        : await hmr.reconcileProfile()
       log('info', 'hot reload applied', {
         reason,
         pending: Array.isArray(result?.pending) ? result.pending.length : 0,

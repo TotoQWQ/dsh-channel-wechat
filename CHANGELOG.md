@@ -6,6 +6,19 @@
 
 ---
 
+## 2.19.1 — 2026-11-15
+
+### 修复
+
+- **热重载报 `must run inside runExclusive`**：`hmr.reconcileProfile()` 现在要求包在 `hmr.runExclusive()` 里调用。`hotReloadPlugin` 已改为优先 `runExclusive(() => reconcileProfile())`，并在没有 `runExclusive` 的旧版本上回退为直接调用。
+- `test-hotreload.mjs` 增加 `runExclusive` 调用断言。
+
+### 变更
+
+- 版本 2.19.0 → 2.19.1（`CHANNEL_VERSION` / `bot_agent` 同步）。
+
+---
+
 ## 2.19.0 — 2026-11-15
 
 ### 变更

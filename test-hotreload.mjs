@@ -63,7 +63,12 @@ makeState(stateDir)
 
 const liveSession = { id: sessionId, seq: 0, snapshotEvents: () => [] }
 const reloadCalls = []
+const exclusiveCalls = []
 const hmr = {
+  runExclusive: async (fn) => {
+    exclusiveCalls.push(Date.now())
+    return fn()
+  },
   reconcileProfile: async () => {
     reloadCalls.push(Date.now())
     return { warnings: [], pending: [], restartReason: undefined }
@@ -117,6 +122,7 @@ try {
     const result = await channel.hotReloadPlugin('test')
     assert.equal(result.ok, true)
     assert.equal(reloadCalls.length, 1)
+    assert.equal(exclusiveCalls.length, 1, '必须包在 runExclusive 里')
   })
 
   await check('HMR 不可用时返回失败信息', async () => {
