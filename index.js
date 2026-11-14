@@ -37,8 +37,8 @@ const ILINK_APP_ID = 'bot'
 /** 0x000MMNNPP：与官方 2.4.10 对齐 */
 const ILINK_APP_CLIENT_VERSION = (2 << 16) | (4 << 8) | 10
 /** 插件版本：与 package.json 保持一致，出现在 base_info.channel_version 里 */
-const CHANNEL_VERSION = '2.15.0'
-const BOT_AGENT = 'DSH-WeChat/2.15.0'
+const CHANNEL_VERSION = '2.16.0'
+const BOT_AGENT = 'DSH-WeChat/2.16.0'
 /** 媒体 CDN（官方 getUploadUrl 没返回 upload_full_url 时用它拼上传地址） */
 const CDN_BASE = 'https://novac2c.cdn.weixin.qq.com/c2c'
 
@@ -551,6 +551,7 @@ const WECHAT_COMMANDS = new Set([
   'tasks',
   'schedule',
   'reload',
+  'voice',
   'help',
   '?',
 ])
@@ -577,6 +578,7 @@ const WECHAT_HELP_TEXT = [
   '/risk      风险消息邮件预警状态（/risk test 发测试邮件）',
   '/tasks     查看定时任务（/tasks 别名 /schedule）',
   '/reload    热重载插件（应用新文件，不用重启 DSH）',
+  '/voice     查看语音转写与兜底状态',
   '/stop      停止当前这一轮',
   '/help      这条帮助',
   '',
@@ -1199,6 +1201,9 @@ function normalizeConfig(raw) {
     hotReload: c.hotReload !== false,
     // 文件变更后自动热重载（默认关，避免编辑到一半就重载）
     autoHotReload: c.autoHotReload === true,
+    // 语音兜底：腾讯转写为空时，尝试 DSH speechToText（仅非 silk 音频）并给对方提示
+    voiceAsr: c.voiceAsr !== false,
+    voiceFallbackHint: c.voiceFallbackHint !== false,
     stateDir,
   }
 }
@@ -1823,8 +1828,7 @@ function createChannel(ctx, config) {
     return 'bin'
   }
 
-  /** 下载并解密一条入站媒体（图片/语音/文件/视频），落盘返回路径。 */
-  const INBOUND_MAX_BYTES = 100 * 1024 * 1024
+  /** 下载并解密一条入站媒体（图片/语音/文件/视频），落盘返回路径。 */  const INBOUND_MAX_BYTES = 100 * 1024 * 1024
 
   function safeFileStem(name, fallback) {
     const base = String(name ?? '')
@@ -1890,6 +1894,31 @@ function createChannel(ctx, config) {
     }
   }
 
+  const VOICE_ASR_EXTS = new Set(['.wav', '.mp3', '.ogg', '.m4a', '.webm', '.flac'])
+
+  /**
+   * 语音兜底：腾讯转写为空时，尝试用 DSH 的 speechToText 服务转写本地音频。
+   * iLink 的语音一般是 silk，本地无法解码，会直接跳过。
+   * @param {string} filePath 已保存的语音文件
+   * @returns {Promise<string>} 转写文本，失败/不支持返回空串
+   */
+  async function transcribeVoiceFile(filePath) {
+    const ext = String(path.extname(filePath ?? '')).toLowerCase()
+    if (!VOICE_ASR_EXTS.has(ext)) return ''
+    const speech = ctx.get('speechToText')
+    if (!speech?.resolve || !speech?.transcribe) return ''
+    try {
+      const audio = new Uint8Array(fs.readFileSync(filePath))
+      if (audio.byteLength === 0) return ''
+      const spec = speech.resolve({ audio })
+      const transcript = await speech.transcribe(spec, new AbortController().signal)
+      return String(transcript?.text ?? '').trim()
+    } catch (err) {
+      log('warn', 'voice asr fallback failed', { file: filePath, error: String(err?.message ?? err) })
+      return ''
+    }
+  }
+
   async function describeInbound(accountId, chatId, msg) {
     const items = Array.isArray(msg?.item_list) ? msg.item_list : []
     const parts = []
@@ -1924,10 +1953,13 @@ function createChannel(ctx, config) {
         if (type === 2) {
           parts.push(`${prefix}[图片] 已解密保存到 ${saved.file}（${size}）。看图就用 read_image 打开这个路径。`.trim())
         } else if (type === 3) {
-          const asr = String(item?.voice_item?.text ?? '').trim()
+          const tencentAsr = String(item?.voice_item?.text ?? '').trim()
+          let transcript = tencentAsr
+          if (!transcript && config.voiceAsr) transcript = await transcribeVoiceFile(saved.file)
           parts.push(
-            `${prefix}[语音${seconds ? ` ${seconds}` : ''}] ${asr ? `转写：${asr}` : '（无转写）'}；` +
-              `原始文件已保存到 ${saved.file}（${size}，silk 编码，需要转码才能播放）`.trim(),
+            `${prefix}[语音${seconds ? ` ${seconds}` : ''}] ${
+              transcript ? `转写：${transcript}` : '（未识别出文字）'
+            }；原始文件已保存到 ${saved.file}（${size}${transcript ? '' : '，silk 编码，需要转码才能播放'}）`,
           )
         } else if (type === 4) {
           parts.push(
@@ -3929,6 +3961,30 @@ function createChannel(ctx, config) {
       }, 300)
       return true
     }
+    if (name === 'voice') {
+      const speech = ctx.get('speechToText')
+      let providers = []
+      try {
+        providers = speech?.listProviders?.() ?? []
+      } catch {
+        providers = []
+      }
+      await replyText(
+        binding,
+        [
+          '🎙️ 语音输入',
+          '腾讯转写：语音消息自带，优先使用',
+          `DSH 本地 ASR：${
+            providers.length > 0
+              ? providers.map((provider) => String(provider?.name ?? provider?.id ?? 'provider')).join('、')
+              : '没有可用 provider（未安装语音输入插件）'
+          }`,
+          `未识别时的提示：${config.voiceFallbackHint ? '开' : '关'}`,
+          'iLink 语音是 silk，本地 ASR 只处理 wav/mp3/ogg/m4a；转写为空会提示对方打字重发',
+        ].join('\n'),
+      )
+      return true
+    }
     if (name === 'stop') {
       const controller = ctx.get('sessionController')
       if (!controller?.cancel) {
@@ -4611,6 +4667,14 @@ function createChannel(ctx, config) {
     const binding = ensureBinding(accountId, chatId, fromUserId, String(msg?.context_token ?? ''))
     await flushPendingOnInbound(binding)
 
+    // 语音兜底：没有转写文字时，先给对方一句可操作的提示（不影响后续消息路由）
+    const voiceWithoutTranscript = (Array.isArray(msg?.item_list) ? msg.item_list : []).some(
+      (item) => Number(item?.type) === 3 && !String(item?.voice_item?.text ?? '').trim(),
+    )
+    if (voiceWithoutTranscript && config.voiceFallbackHint) {
+      void sendProgressMessage(binding, '🎙️ 这条语音没识别出文字，麻烦打字或重发一下（可能太短/方言）。')
+    }
+
     // 有选项/审批在等微信回复：这条消息当作答案消费掉，不再转发给会话
     const waiting = optionReplyWaiter(accountId, chatId)
     if (waiting) {
@@ -5179,6 +5243,7 @@ function createChannel(ctx, config) {
     maybeSendEmotions,
     emotionSummary,
     captureEmotionUpload,
+    transcribeVoiceFile,
     waitingOptions: () => optionWaits.size,
     handleHttp,
     sendToChat,

@@ -116,6 +116,9 @@
         hotReload: true
         # 文件变更后自动热重载（默认关，避免编辑到一半就重载）
         autoHotReload: false
+        # 语音兜底：腾讯转写为空时尝试 DSH speechToText（仅非 silk 音频），并提示对方打字
+        voiceAsr: true
+        voiceFallbackHint: true
         # 跨账号转发：同一会话下，A 号收到的消息也发到 B/C 号的微信
         relayAcrossAccounts: true
         relayPrefix: '[{account}] '
