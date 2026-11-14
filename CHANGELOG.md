@@ -6,6 +6,23 @@
 
 ---
 
+## 2.9.0 — 2026-11-14
+
+### 新增
+
+- **分段发送**：微信不支持流式，长回复改为按段落切成多条消息发送。
+  - `segmentMode: paragraph`（默认）：先按空行分段，能合并的短段合并，超长段再按句号/空格/长度切（复用 `splitByLength`）；`length` 回到旧的纯长度切分。
+  - `segmentMaxChars`（默认 0 = 用 `maxReplyChars`，最短 200）控制每条上限；`segmentDelayMs`（默认 500ms）控制相邻两条间隔，降低限流/乱序风险；`segmentIndex: true` 时给多条加「（1/3）」序号。
+  - 发送失败/`-2 prepare failed` 的 fallback 逻辑保持不变；引用库仍按实际发出的每条记录。
+- 新自测 `test-segment.mjs`（5 项：段落合并/切分、length 模式、分条+序号+间隔、无序号、纯长度模式）。
+
+### 变更
+
+- `splitText` 抽成模块级 `splitByLength`，`sendToChat` 改用 `segmentText`。
+- 版本 2.8.0 → 2.9.0（`CHANNEL_VERSION` / `bot_agent` 同步）。
+
+---
+
 ## 2.8.0 — 2026-11-14
 
 ### 新增

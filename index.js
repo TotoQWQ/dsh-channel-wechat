@@ -32,8 +32,8 @@ const ILINK_APP_ID = 'bot'
 /** 0x000MMNNPP：与官方 2.4.10 对齐 */
 const ILINK_APP_CLIENT_VERSION = (2 << 16) | (4 << 8) | 10
 /** 插件版本：与 package.json 保持一致，出现在 base_info.channel_version 里 */
-const CHANNEL_VERSION = '2.8.0'
-const BOT_AGENT = 'DSH-WeChat/2.8.0'
+const CHANNEL_VERSION = '2.9.0'
+const BOT_AGENT = 'DSH-WeChat/2.9.0'
 /** 媒体 CDN（官方 getUploadUrl 没返回 upload_full_url 时用它拼上传地址） */
 const CDN_BASE = 'https://novac2c.cdn.weixin.qq.com/c2c'
 
@@ -595,6 +595,72 @@ function parseWechatCommand(text) {
 }
 
 /**
+ * 按上限切分长文本（优先换行/句号/空格，避免把词切开）。
+ * @param {string} text 文本
+ * @param {number} limit 每段上限
+ * @returns {string[]} 分段
+ */
+function splitByLength(text, limit) {
+  const value = String(text ?? '')
+  const max = Math.max(1, Number(limit) || 1)
+  if (value.length <= max) return value ? [value] : []
+  const chunks = []
+  let rest = value
+  while (rest.length > max) {
+    let cut = rest.lastIndexOf('\n', max)
+    if (cut < max * 0.5) cut = rest.lastIndexOf('。', max)
+    if (cut < max * 0.5) cut = rest.lastIndexOf(' ', max)
+    if (cut < max * 0.5) cut = max
+    chunks.push(rest.slice(0, cut).trim())
+    rest = rest.slice(cut).trim()
+  }
+  if (rest) chunks.push(rest)
+  return chunks.filter(Boolean)
+}
+
+/**
+ * 把一条回复切成微信消息段（微信不支持流式，只能整段分条发）。
+ * paragraph 模式先按空行分段、能合并就合并，超长段再按长度切；length 模式保持旧的纯长度切分。
+ * @param {string} text 文本
+ * @param {{ maxChars?: number, mode?: 'paragraph' | 'length' }} [options]
+ * @returns {string[]} 消息段
+ */
+function segmentText(text, options = {}) {
+  const value = String(text ?? '')
+  if (!value.trim()) return []
+  const maxChars = Math.max(200, Number(options.maxChars) || 1800)
+  const mode = options.mode === 'length' ? 'length' : 'paragraph'
+  if (mode === 'length') return splitByLength(value, maxChars)
+  const blocks = value
+    .split(/\n{2,}/)
+    .map((block) => block.trim())
+    .filter(Boolean)
+  const chunks = []
+  let current = ''
+  for (const block of blocks) {
+    if (block.length > maxChars) {
+      if (current) {
+        chunks.push(current)
+        current = ''
+      }
+      for (const piece of splitByLength(block, maxChars)) chunks.push(piece)
+      continue
+    }
+    if (!current) {
+      current = block
+      continue
+    }
+    if (current.length + 2 + block.length <= maxChars) current = `${current}\n\n${block}`
+    else {
+      chunks.push(current)
+      current = block
+    }
+  }
+  if (current) chunks.push(current)
+  return chunks.length > 0 ? chunks : splitByLength(value, maxChars)
+}
+
+/**
  * 评估一个账号的连接健康度（纯函数）。
  * @param {object} account 账号记录
  * @param {boolean} running 长轮询是否在跑
@@ -793,6 +859,17 @@ function normalizeConfig(raw) {
     healthCheck: c.healthCheck !== false,
     healthStaleMs:
       Number.isFinite(c.healthStaleMs) && c.healthStaleMs >= 30_000 ? c.healthStaleMs : 120_000,
+    // 分段发送：长回复按段落切成多条微信消息（微信不支持流式），可加序号与间隔
+    segmentMode: c.segmentMode === 'length' ? 'length' : 'paragraph',
+    segmentMaxChars:
+      Number.isFinite(c.segmentMaxChars) && c.segmentMaxChars >= 200
+        ? Math.floor(c.segmentMaxChars)
+        : 0,
+    segmentDelayMs:
+      Number.isFinite(c.segmentDelayMs) && c.segmentDelayMs >= 0
+        ? Math.min(5000, Math.floor(c.segmentDelayMs))
+        : 500,
+    segmentIndex: c.segmentIndex === true,
     stateDir,
   }
 }
@@ -1723,26 +1800,17 @@ function createChannel(ctx, config) {
   // -- 发送 ----------------------------------------------------------------
 
   function splitText(text, limit) {
-    const value = String(text ?? '')
-    if (value.length <= limit) return value ? [value] : []
-    const chunks = []
-    let rest = value
-    while (rest.length > limit) {
-      let cut = rest.lastIndexOf('\n', limit)
-      if (cut < limit * 0.5) cut = rest.lastIndexOf('。', limit)
-      if (cut < limit * 0.5) cut = rest.lastIndexOf(' ', limit)
-      if (cut < limit * 0.5) cut = limit
-      chunks.push(rest.slice(0, cut).trim())
-      rest = rest.slice(cut).trim()
-    }
-    if (rest) chunks.push(rest)
-    return chunks.filter(Boolean)
+    return splitByLength(text, limit)
   }
 
   async function sendToChat({ accountId, toUserId, contextToken, text }) {
     const account = state.accounts[accountId]
     if (!account?.botToken) throw new Error('账号未登录或已移除')
-    const chunks = splitText(formatWechatText(text, { maxLine: config.formatMaxLine }), config.maxReplyChars)
+    const formatted = formatWechatText(text, { maxLine: config.formatMaxLine })
+    const chunks = segmentText(formatted, {
+      maxChars: config.segmentMaxChars || config.maxReplyChars,
+      mode: config.segmentMode,
+    })
     const results = []
 
     const postOnce = async (chunk, token) => {
@@ -1761,7 +1829,10 @@ function createChannel(ctx, config) {
       return { resp, ret: Number(resp?.ret ?? 0) }
     }
 
-    for (const chunk of chunks) {
+    for (let index = 0; index < chunks.length; index += 1) {
+      if (index > 0 && config.segmentDelayMs > 0) await sleep(config.segmentDelayMs)
+      const raw = chunks[index]
+      const chunk = config.segmentIndex && chunks.length > 1 ? `（${index + 1}/${chunks.length}）${raw}` : raw
       // iLink 在 HTTP 200 里用 ret 表示业务失败（-2 prepare failed = context_token 失效等），
       // 不检查就会静默丢消息。带 token 失败时按官方插件的做法退回「不带 context_token」再试一次。
       let attempt = await postOnce(chunk, contextToken)
@@ -4786,6 +4857,8 @@ export const __test = {
   sanitizeEmotionStem,
   summarizeThinkingDelta,
   evaluateAccountHealth,
+  segmentText,
+  splitByLength,
   decorateReply,
   listStickers,
   pickSticker,

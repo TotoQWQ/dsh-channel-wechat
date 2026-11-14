@@ -63,6 +63,14 @@
         healthStaleMs: 120000
         # 卡住时自动重启该账号的轮询
         healthCheck: true
+        # 分段发送（微信不支持流式）：paragraph 先按空行分段再按长度切；length 为旧的纯长度切
+        segmentMode: paragraph
+        # 每条微信消息的字符上限（0 = 用 maxReplyChars）
+        segmentMaxChars: 0
+        # 相邻两条之间的间隔（毫秒）
+        segmentDelayMs: 500
+        # 多条时是否加「（1/3）」序号
+        segmentIndex: false
         # 跨账号转发：同一会话下，A 号收到的消息也发到 B/C 号的微信
         relayAcrossAccounts: true
         relayPrefix: '[{account}] '
