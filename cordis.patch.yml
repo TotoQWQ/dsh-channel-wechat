@@ -24,6 +24,14 @@
         mirrorAssistantMessages: true
         # 镜像扫描间隔（毫秒）
         mirrorIntervalMs: 1200
+        # 选项 / 审批也发到微信：DSH 里的 ask_user_question 选项与审批卡会同步到微信，
+        # 直接回序号（或文字）即可作答，不用回电脑点
+        relayOptions: true
+        # 微信里等选项/审批回复的时长（毫秒）；超时就把这次请求交还电脑端弹卡
+        optionReplyTimeoutMs: 110000
+        # 进度提示：一轮跑得久时，每隔一段时间在微信里报一次「已经思考多久」
+        progressHeartbeat: true
+        progressIntervalMs: 120000
         # 跨账号转发：同一会话下，A 号收到的消息也发到 B/C 号的微信
         relayAcrossAccounts: true
         relayPrefix: '[{account}] '

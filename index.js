@@ -32,8 +32,8 @@ const ILINK_APP_ID = 'bot'
 /** 0x000MMNNPP：与官方 2.4.10 对齐 */
 const ILINK_APP_CLIENT_VERSION = (2 << 16) | (4 << 8) | 10
 /** 插件版本：与 package.json 保持一致，出现在 base_info.channel_version 里 */
-const CHANNEL_VERSION = '2.4.3'
-const BOT_AGENT = 'DSH-WeChat/2.4.3'
+const CHANNEL_VERSION = '2.4.4'
+const BOT_AGENT = 'DSH-WeChat/2.4.4'
 /** 媒体 CDN（官方 getUploadUrl 没返回 upload_full_url 时用它拼上传地址） */
 const CDN_BASE = 'https://novac2c.cdn.weixin.qq.com/c2c'
 
@@ -267,6 +267,163 @@ export function formatWechatText(input, { maxLine = 140 } = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// 选项 / 审批转发（纯函数：排版与解析，单测直接调用）
+// ---------------------------------------------------------------------------
+
+/** 微信里选项提示的最大字数，超了会分条发送。 */
+const OPTION_PROMPT_MAX = 1800
+
+/** 审批允许的同义词（小写比较）。 */
+const APPROVE_WORDS = ['1', '允许', '同意', '可以', '行', 'ok', 'yes', 'y', 'allow']
+/** 审批拒绝的同义词（小写比较）。 */
+const REJECT_WORDS = ['2', '拒绝', '不允许', '不同意', '不行', 'no', 'n', 'deny', 'reject']
+
+/**
+ * 把一道 ask_user_question 排成微信文本：问句 + 编号选项 + 回复说明。
+ * @param {object} question 服务层的 AskUserQuestionItem
+ * @param {number} index 当前题号（从 0 开始）
+ * @param {number} total 本轮总题数
+ * @param {{ timeoutSec?: number }} [options] 超时提示秒数
+ * @returns {string} 微信文本
+ */
+function formatQuestionPrompt(question, index, total, { timeoutSec = 0 } = {}) {
+  const options = Array.isArray(question?.options) ? question.options : []
+  const lines = []
+  const step = total > 1 ? `（第 ${index + 1}/${total} 题）` : ''
+  lines.push(`🧩 DSH 需要你选择${step}`)
+  if (question?.header) lines.push(`【${String(question.header).trim()}】`)
+  lines.push(String(question?.question ?? '').trim())
+  if (question?.detail) lines.push(String(question.detail).trim())
+  if (options.length > 0) {
+    lines.push('')
+    options.forEach((option, i) => {
+      const description = option?.description ? ` —— ${option.description}` : ''
+      lines.push(`${i + 1}. ${String(option?.label ?? '')}${description}`)
+    })
+    lines.push('')
+    lines.push(
+      question?.multiSelect === true
+        ? '回复序号选择，多选用逗号（如 1,3）；也可以直接回复你自己的答案。'
+        : '回复序号选择；也可以直接回复你自己的答案。',
+    )
+  } else {
+    lines.push('')
+    lines.push('直接回复你的答案即可。')
+  }
+  if (timeoutSec > 0) lines.push(`（${timeoutSec} 秒内回复有效，超时转到电脑端）`)
+  return lines.join('\n').slice(0, OPTION_PROMPT_MAX)
+}
+
+/**
+ * 解析「1」「1,3」「1，3」这类序号回复。
+ * @param {string} text 微信原文
+ * @returns {number[] | null} 序号数组；不是纯序号时返回 null
+ */
+function parseNumberList(text) {
+  const value = String(text ?? '').trim()
+  if (!/^\d+(\s*[,，、]\s*\d+)*$/.test(value)) return null
+  return value
+    .split(/[,，、]/)
+    .map((part) => Number(part.trim()))
+    .filter((number) => Number.isFinite(number))
+}
+
+/**
+ * 把一条微信回复解析成 AskUserQuestionAnswerItem。
+ * 纯数字按选项序号；与某个选项完全同名也算选中；其余文字作为自定义答案。
+ * @param {string} text 微信原文
+ * @param {object} question 服务层的 AskUserQuestionItem
+ * @returns {{ answer?: object, error?: string }}
+ */
+function parseQuestionReply(text, question) {
+  const raw = String(text ?? '').trim()
+  if (!raw) return { error: '回复不能为空' }
+  const options = Array.isArray(question?.options) ? question.options : []
+  const id = String(question?.id ?? '')
+  if (options.length > 0) {
+    const numbers = parseNumberList(raw)
+    if (numbers && numbers.length > 0) {
+      const outOfRange = numbers.find((number) => number < 1 || number > options.length)
+      if (outOfRange !== undefined) return { error: `序号 ${outOfRange} 超出范围（1-${options.length}）` }
+      if (question?.multiSelect !== true && numbers.length > 1) return { error: '这题只能选一个，请只回一个序号' }
+      const selected = []
+      for (const number of numbers) {
+        const label = String(options[number - 1]?.label ?? '')
+        if (label && !selected.includes(label)) selected.push(label)
+      }
+      return { answer: { id, selected } }
+    }
+    const exact = options.find((option) => String(option?.label ?? '') === raw)
+    if (exact) return { answer: { id, selected: [String(exact.label)] } }
+    return { answer: { id, selected: [], custom: raw } }
+  }
+  return { answer: { id, selected: [], custom: raw } }
+}
+
+/**
+ * 取审批请求的可读原因：优先 displayReason（中文），退回 reason。
+ * @param {object} request approval/request 的载荷
+ * @returns {string} 原因文本，可能为空
+ */
+function describeApprovalReason(request) {
+  const display = request?.displayReason && typeof request.displayReason === 'object' ? request.displayReason : null
+  if (display) {
+    const preferred = display.zh ?? display['zh-CN'] ?? display.en
+    if (typeof preferred === 'string' && preferred.trim()) return preferred.trim()
+    const first = Object.values(display).find((value) => typeof value === 'string' && value.trim())
+    if (first) return first.trim()
+  }
+  return String(request?.reason ?? '').trim()
+}
+
+/**
+ * 把一条审批请求排成微信文本。
+ * @param {object} request approval/request 的载荷
+ * @param {{ timeoutSec?: number }} [options] 超时提示秒数
+ * @returns {string} 微信文本
+ */
+function formatApprovalPrompt(request, { timeoutSec = 0 } = {}) {
+  const lines = ['🔐 DSH 需要你审批']
+  const toolName = String(request?.toolName ?? '').trim()
+  if (toolName) lines.push(`工具：${toolName}`)
+  const reason = describeApprovalReason(request)
+  if (reason) lines.push(reason)
+  lines.push('')
+  lines.push('1. 允许一次')
+  lines.push('2. 拒绝')
+  lines.push(`回复 1 或 2${timeoutSec > 0 ? `；${timeoutSec} 秒内有效，超时转到电脑端` : ''}`)
+  return lines.join('\n').slice(0, OPTION_PROMPT_MAX)
+}
+
+/**
+ * 解析审批回复。
+ * @param {string} text 微信原文
+ * @returns {{ outcome?: string, error?: string }} allowed-once / rejected，或错误提示
+ */
+function parseApprovalReply(text) {
+  const value = String(text ?? '').trim().toLowerCase()
+  if (!value) return { error: '请回复 1（允许一次）或 2（拒绝）' }
+  if (APPROVE_WORDS.includes(value)) return { outcome: 'allowed-once' }
+  if (REJECT_WORDS.includes(value)) return { outcome: 'rejected' }
+  return { error: '请回复 1（允许一次）或 2（拒绝）' }
+}
+
+/**
+ * 把毫秒时长排成「3 分 12 秒」这样的中文短句。
+ * @param {number} ms 时长
+ * @returns {string} 时长文本
+ */
+function formatDuration(ms) {
+  const total = Math.max(0, Math.floor(Number(ms) || 0) / 1000)
+  const hours = Math.floor(total / 3600)
+  const minutes = Math.floor((total % 3600) / 60)
+  const seconds = Math.floor(total % 60)
+  if (hours > 0) return `${hours} 小时 ${minutes} 分`
+  if (minutes > 0) return `${minutes} 分 ${seconds} 秒`
+  return `${seconds} 秒`
+}
+
+// ---------------------------------------------------------------------------
 // 配置
 // ---------------------------------------------------------------------------
 
@@ -294,6 +451,20 @@ function normalizeConfig(raw) {
     relayPrefix: typeof c.relayPrefix === 'string' ? c.relayPrefix : '[{account}] ',
     // 发到微信前按这个宽度按句读断行（中文一行 ~20 字，60 字约三屏）
     formatMaxLine: Number.isFinite(c.formatMaxLine) && c.formatMaxLine >= 20 ? c.formatMaxLine : 60,
+    // 选项/审批转发：DSH 里弹出选项（ask_user_question）或审批卡时，也在微信里发一份并接受序号回复
+    relayOptions: c.relayOptions !== false,
+    // 微信里等选项回复的时长，超时就把问题交还给电脑端（GUI 弹卡）。
+    // 比 ask_user_question 的默认 120 秒略短，保证先由微信侧超时、再干净地交给 GUI。
+    optionReplyTimeoutMs:
+      Number.isFinite(c.optionReplyTimeoutMs) && c.optionReplyTimeoutMs >= 5000
+        ? c.optionReplyTimeoutMs
+        : 110_000,
+    // 进度提示：一轮跑得久时，每隔一段时间在微信里报一次「已经思考多久」
+    progressHeartbeat: c.progressHeartbeat !== false,
+    progressIntervalMs:
+      Number.isFinite(c.progressIntervalMs) && c.progressIntervalMs >= 30_000
+        ? c.progressIntervalMs
+        : 120_000,
     stateDir,
   }
 }
@@ -331,10 +502,16 @@ function createChannel(ctx, config) {
   /** @type {Map<string, {abort:AbortController|null, running:boolean}>} */
   const monitors = new Map()
   const chatQueues = new Map()
+  /** 正在等微信回复的选项/审批：binding.key → waiter */
+  const optionWaits = new Map()
 
   let mirrorTimer = null
   let mirrorBusy = false
   let saveTimer = null
+  let progressTimer = null
+
+  // 构造时先读一次状态：工具与测试可以直接使用绑定表；start() 会再读一次（幂等）
+  loadState()
 
   // -- 日志 ----------------------------------------------------------------
 
@@ -1692,6 +1869,237 @@ function createChannel(ctx, config) {
     }
   }
 
+  // -- 选项 / 审批：DSH 弹选项时也发到微信 ---------------------------------
+
+  function bindingsOfSession(sessionId) {
+    return Object.values(state.bindings).filter((binding) => binding && binding.sessionId === sessionId)
+  }
+
+  function optionTargets(sessionId) {
+    return bindingsOfSession(sessionId).filter((binding) => Boolean(state.accounts[binding.accountId]?.botToken))
+  }
+
+  function disposeOptionWaiter(waiter) {
+    for (const key of waiter.keys) {
+      if (optionWaits.get(key) === waiter) optionWaits.delete(key)
+    }
+    if (waiter.timer) clearTimeout(waiter.timer)
+    waiter.timer = null
+    if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener('abort', waiter.onAbort)
+  }
+
+  function waitOptionReply({ keys, kind, signal, timeoutMs }) {
+    return new Promise((resolve) => {
+      const waiter = { keys: [...keys], kind, signal, settled: false, timer: null, onAbort: null }
+      const settle = (result) => {
+        if (waiter.settled) return
+        waiter.settled = true
+        disposeOptionWaiter(waiter)
+        resolve(result)
+      }
+      waiter.settle = settle
+      for (const key of waiter.keys) optionWaits.set(key, waiter)
+      if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+        waiter.timer = setTimeout(() => settle({ status: 'timeout' }), timeoutMs)
+        if (typeof waiter.timer?.unref === 'function') waiter.timer.unref()
+      }
+      if (signal) {
+        waiter.onAbort = () => settle({ status: 'aborted' })
+        if (signal.aborted) waiter.onAbort()
+        else signal.addEventListener('abort', waiter.onAbort, { once: true })
+      }
+    })
+  }
+
+  async function sendOptionPrompt(targets, text) {
+    let sent = 0
+    for (const binding of targets) {
+      try {
+        await sendToBinding(binding, text)
+        sent += 1
+      } catch (err) {
+        log('warn', 'option prompt send failed', { key: binding.key, error: String(err?.message ?? err) })
+      }
+    }
+    return sent
+  }
+
+  /**
+   * DSH 弹出 ask_user_question 时把题目发到绑定的微信，等微信回复序号/文字。
+   * @returns {Promise<{answers: object[]} | undefined>} 答案；undefined 表示交还电脑端（GUI 弹卡）
+   */
+  async function relayUserQuestion(request) {
+    if (!config.relayOptions) return undefined
+    const sessionId = request?.agent?.id
+    if (!sessionId) return undefined
+    const questions = Array.isArray(request.questions) ? request.questions : []
+    if (questions.length === 0) return undefined
+    const targets = optionTargets(sessionId)
+    if (targets.length === 0) return undefined
+    const keys = targets.map((binding) => binding.key)
+    const timeoutSec = Math.round(config.optionReplyTimeoutMs / 1000)
+    const answers = []
+    for (let index = 0; index < questions.length; index += 1) {
+      const question = questions[index]
+      const prompt = formatQuestionPrompt(question, index, questions.length, { timeoutSec })
+      if ((await sendOptionPrompt(targets, prompt)) === 0) return undefined
+      let answer = null
+      while (answer === null) {
+        const reply = await waitOptionReply({
+          keys,
+          kind: 'question',
+          signal: request.signal,
+          timeoutMs: config.optionReplyTimeoutMs,
+        })
+        if (reply.status === 'aborted') return undefined
+        if (reply.status === 'timeout') {
+          void sendOptionPrompt(targets, '⏱ 微信等待超时，这道题已转到电脑端。')
+          return undefined
+        }
+        const parsed = parseQuestionReply(reply.text, question)
+        if (parsed.error) {
+          await sendOptionPrompt(targets, `⚠️ ${parsed.error}`)
+          continue
+        }
+        answer = parsed.answer
+      }
+      answers.push(answer)
+      const picked = answer.custom ? `自定义「${answer.custom}」` : answer.selected.join('、')
+      await sendOptionPrompt(targets, `✅ 已收到：${picked}`)
+    }
+    log('info', 'question relayed to wechat', { sessionId, answers: answers.length })
+    return { answers }
+  }
+
+  /**
+   * DSH 请求审批时把审批发到绑定的微信，等 1/2 回复。
+   * @returns {Promise<string | undefined>} 'allowed-once' / 'rejected'；undefined 表示交还电脑端
+   */
+  async function relayApproval(request) {
+    if (!config.relayOptions) return undefined
+    const sessionId = request?.agent?.id
+    if (!sessionId) return undefined
+    const targets = optionTargets(sessionId)
+    if (targets.length === 0) return undefined
+    const keys = targets.map((binding) => binding.key)
+    const timeoutSec = Math.round(config.optionReplyTimeoutMs / 1000)
+    const prompt = formatApprovalPrompt(request, { timeoutSec })
+    if ((await sendOptionPrompt(targets, prompt)) === 0) return undefined
+    for (;;) {
+      const reply = await waitOptionReply({
+        keys,
+        kind: 'approval',
+        signal: request.signal,
+        timeoutMs: config.optionReplyTimeoutMs,
+      })
+      if (reply.status === 'aborted') return 'cancelled'
+      if (reply.status === 'timeout') {
+        void sendOptionPrompt(targets, '⏱ 微信等待超时，审批已转到电脑端。')
+        return undefined
+      }
+      const parsed = parseApprovalReply(reply.text)
+      if (parsed.error) {
+        await sendOptionPrompt(targets, `⚠️ ${parsed.error}`)
+        continue
+      }
+      log('info', 'approval relayed to wechat', {
+        sessionId,
+        toolName: request.toolName,
+        outcome: parsed.outcome,
+      })
+      await sendOptionPrompt(targets, parsed.outcome === 'allowed-once' ? '✅ 已允许一次' : '⛔ 已拒绝')
+      return parsed.outcome
+    }
+  }
+
+  function optionReplyWaiter(accountId, chatId) {
+    return optionWaits.get(bindingKeyOf(accountId, chatId))
+  }
+
+  // -- 进度提示：一轮跑得久时，隔一段时间报一次「已经思考多久」 -------------
+
+  /** sessionId → { startedAt, beats } */
+  const activeTurns = new Map()
+
+  /**
+   * 记录会话的开轮/收轮，供进度提示使用。
+   * @param {object|string} session 会话对象或会话 id
+   * @param {{ type?: string }} event Session 事件
+   */
+  function observeSessionEvent(session, event) {
+    const sessionId = String(session?.id ?? session ?? '')
+    if (!sessionId) return
+    const type = String(event?.type ?? '')
+    if (type === 'turn/start') {
+      if (!activeTurns.has(sessionId)) activeTurns.set(sessionId, { startedAt: Date.now(), beats: 0 })
+      return
+    }
+    if (type === 'turn/end') activeTurns.delete(sessionId)
+  }
+
+  async function sendProgressMessage(binding, text) {
+    try {
+      await sendToChat({
+        accountId: binding.accountId,
+        toUserId: binding.toUserId || String(binding.chatId).replace(/^user:/, ''),
+        contextToken: binding.contextToken,
+        text,
+      })
+      binding.lastOutboundAt = Date.now()
+      return true
+    } catch (err) {
+      // 进度提示是尽力而为：失败不排队，避免恢复后一次性刷屏
+      log('warn', 'progress send failed', { key: binding.key, error: String(err?.message ?? err) })
+      return false
+    }
+  }
+
+  /** 到点就给所有有绑定的会话发一条进度；等待选项回复时改报「等你回复」。 */
+  async function progressTick() {
+    if (!config.progressHeartbeat) return
+    const now = Date.now()
+    for (const [sessionId, turn] of [...activeTurns]) {
+      const session = ctx.get('sessions')?.get?.(sessionId)
+      const stale = !session || now - turn.startedAt > 6 * 3600_000
+      if (stale) {
+        activeTurns.delete(sessionId)
+        continue
+      }
+      const targets = optionTargets(sessionId)
+      if (targets.length === 0) continue
+      const elapsed = now - turn.startedAt
+      if (elapsed < config.progressIntervalMs * (turn.beats + 1)) continue
+      turn.beats += 1
+      const label = formatDuration(elapsed)
+      for (const binding of targets) {
+        const waiting = optionWaits.get(binding.key)
+        const text = waiting
+          ? `⌛ 在等你回复：已经等了 ${label}\n回复对应序号即可继续；超时会转回电脑端处理。`
+          : `⏳ 还在处理：已经思考 ${label}（第 ${turn.beats} 次进度）\nDSH 仍在执行，完成后会把结果发到微信。`
+        await sendProgressMessage(binding, text)
+      }
+      log('info', 'progress sent', {
+        sessionId,
+        elapsedMs: elapsed,
+        beat: turn.beats,
+        waiting: targets.some((binding) => Boolean(optionWaits.get(binding.key))),
+      })
+    }
+  }
+
+  function startProgress() {
+    if (progressTimer) return
+    progressTimer = setInterval(() => {
+      void progressTick().catch((err) => log('warn', 'progress tick failed', { error: String(err?.message ?? err) }))
+    }, 15_000)
+    if (typeof progressTimer?.unref === 'function') progressTimer.unref()
+  }
+
+  function stopProgress() {
+    if (progressTimer) clearInterval(progressTimer)
+    progressTimer = null
+  }
+
   // -- 入站 ----------------------------------------------------------------
 
   async function handleInbound(accountId, msg, options = {}) {
@@ -1708,6 +2116,14 @@ function createChannel(ctx, config) {
     const chatId = chatIdOf(msg)
     const text = await describeInbound(accountId, chatId, msg)
     if (!text) return { empty: true }
+
+    // 有选项/审批在等微信回复：这条消息当作答案消费掉，不再转发给会话
+    const waiting = optionReplyWaiter(accountId, chatId)
+    if (waiting) {
+      log('info', 'option reply', { accountId, chatId, kind: waiting.kind, chars: text.length })
+      waiting.settle({ status: 'ok', text })
+      return { optionReply: true, kind: waiting.kind }
+    }
 
     // 记下这条入站原文供后续「引用」回查；用干净摘要（不带本地媒体路径）
     rememberQuote(accountId, chatId, msg?.message_id, relaySummary(msg) || text)
@@ -1920,6 +2336,12 @@ function createChannel(ctx, config) {
       })),
       mirror: { running: Boolean(mirrorTimer), intervalMs: config.mirrorIntervalMs },
       settings: { defaultSessionId: state.settings?.defaultSessionId || '' },
+      options: { relay: config.relayOptions, waiting: optionWaits.size, replyTimeoutMs: config.optionReplyTimeoutMs },
+      progress: {
+        heartbeat: config.progressHeartbeat,
+        intervalMs: config.progressIntervalMs,
+        tracking: activeTurns.size,
+      },
       stateDir: config.stateDir,
       logFile,
     }
@@ -2105,12 +2527,14 @@ function createChannel(ctx, config) {
     loadQuotes()
     for (const account of accounts()) startMonitor(account.id)
     startMirror()
+    startProgress()
     log('info', 'channel started', { accounts: accounts().length, quotes: Object.keys(quotes).length })
   }
 
   function stop() {
     for (const accountId of [...monitors.keys()]) stopMonitor(accountId)
     stopMirror()
+    stopProgress()
     login.abort?.abort()
     login.abort = null
     if (saveTimer) {
@@ -2130,6 +2554,12 @@ function createChannel(ctx, config) {
     listSessions,
     bindSession,
     unbindSession,
+    relayUserQuestion,
+    relayApproval,
+    handleInbound,
+    observeSessionEvent,
+    progressTick,
+    waitingOptions: () => optionWaits.size,
     handleHttp,
     sendToChat,
     sendProbe,
@@ -2561,6 +2991,66 @@ export function apply(ctx, rawConfig) {
   let routeTimer = null
   let routeAttempts = 0
 
+  // 选项 / 审批：抢在 Web 客户端桥接之前拿到请求，优先走微信；拿不到（或超时）就 next() 交还 GUI。
+  if (typeof ctx.on === 'function') {
+    cleanups.push(
+      ctx.on(
+        'user-questions/request',
+        async (request, next) => {
+          try {
+            const answer = await channel.relayUserQuestion(request)
+            if (answer !== undefined) return answer
+          } catch (err) {
+            try {
+              ctx.logger?.warn?.(`[wechat] question relay failed: ${String(err)}`)
+            } catch {
+              /* ignore */
+            }
+          }
+          return next()
+        },
+        { prepend: true, global: true },
+      ),
+    )
+    cleanups.push(
+      ctx.on(
+        'approval/request',
+        async (request, next) => {
+          try {
+            const outcome = await channel.relayApproval(request)
+            if (outcome !== undefined) return outcome
+          } catch (err) {
+            try {
+              ctx.logger?.warn?.(`[wechat] approval relay failed: ${String(err)}`)
+            } catch {
+              /* ignore */
+            }
+          }
+          return next()
+        },
+        { prepend: true, global: true },
+      ),
+    )
+    // 进度提示要跟着每个会话的开轮/收轮走，所以全局收 session/event
+    cleanups.push(
+      ctx.on(
+        'session/event',
+        (session, event) => {
+          try {
+            channel.observeSessionEvent(session, event)
+          } catch (err) {
+            try {
+              ctx.logger?.warn?.(`[wechat] session event observe failed: ${String(err)}`)
+            } catch {
+              /* ignore */
+            }
+          }
+        },
+        { global: true },
+      ),
+    )
+  }
+
   // webServer 可能在插件激活之后才就绪（冷启动顺序不固定），所以轮询等待而不是只试一次。
   const registerRoute = () => {
     routeTimer = null
@@ -2619,4 +3109,17 @@ export function apply(ctx, rawConfig) {
     ctx.on?.('dispose', dispose)
   }
   registerTools(ctx, channel)
+}
+
+/** 单测钩子：上面这些纯函数只做排版/解析，导出给 test-options.mjs 用，不改变运行时行为。 */
+export const __test = {
+  formatQuestionPrompt,
+  parseQuestionReply,
+  parseNumberList,
+  formatApprovalPrompt,
+  parseApprovalReply,
+  describeApprovalReason,
+  formatDuration,
+  normalizeConfig,
+  createChannel,
 }

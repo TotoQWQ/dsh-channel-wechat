@@ -6,6 +6,23 @@
 
 ---
 
+## 2.4.4 — 2026-11-14
+
+### 新增
+
+- **微信端作答选项 / 审批**：DSH 弹出 `ask_user_question` 选项卡或审批卡时，插件把题目与编号选项同步发到绑定的微信。微信回 `1` / `2` / `1,3`（中英文逗号、顿号都认）或直接回文字即可作答；审批回 `1` 允许一次、`2` 拒绝。实现上监听 `user-questions/request` 与 `approval/request` 两个瀑布事件，用 `{ prepend: true, global: true }` 抢在 Web 客户端桥接之前，入站文本在 `handleInbound` 处被消费，不再转发给会话。
+- **长任务进度提示**：跟踪 `turn/start` / `turn/end`，一轮跑得久时每 `progressIntervalMs`（默认 2 分钟）发一条「⏳ 还在处理：已经思考 X 分 Y 秒（第 N 次进度）」；若这时正在等微信作答，文案改为「⌛ 在等你回复：已经等了 X 分」。收轮即停，发送失败只记日志、不进补发队列。
+- **新配置**：`relayOptions`（默认 `true`）、`optionReplyTimeoutMs`（默认 `110000`）、`progressHeartbeat`（默认 `true`）、`progressIntervalMs`（默认 `120000`，最短 `30000`）。
+- **新自测**：`test-options.mjs`（9 项，排版/解析）、`test-relay.mjs`（6 项，假 iLink 服务端到端）、`test-progress.mjs`（6 项，进度节流/文案/静默）。
+
+### 变更
+
+- 选项题在微信里超时（默认 110 秒，短于 `ask_user_question` 的 120 秒）后，先给微信发一条「已转到电脑端」，再 `next()` 把请求交还 Web 客户端弹卡；未绑定微信的会话完全不受影响。
+- `wechat_status` 增加 `options` / `progress` 两段状态，便于确认转发是否生效。
+- 版本 2.4.3 → 2.4.4（`CHANNEL_VERSION` / `bot_agent` 同步）。
+
+---
+
 ## 2.4.3 — 2026-11-13
 
 ### 新增

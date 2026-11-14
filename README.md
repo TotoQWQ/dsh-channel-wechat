@@ -22,6 +22,8 @@
 - **任务进度播报**：wechat_report 把「标题 + 勾选清单（✅/🔄/⬜/⛔/⚠️）+ 备注」渲染成一条微信消息推给指定聊天；token 过期时自动进发送队列等补发。
 - **跨账号转发**：多个微信号绑定同一个会话时，A 号收到的消息会自动转发到 B/C 号的微信（带 `[{account}] ` 前缀，可配 `relayPrefix`）；助手的回复本来就按绑定分别送达，所以三个号看到的是同一段对话。
 - **微信引用**：在微信里长按「引用」某条消息（含只选中一段）再发问时，被引用的原文会以 `【引用】…` 的形式一起进入模型上下文。插件维护最近 800 条收发消息的引用库（`quotes.json`），客户端只给 `svr_id` 时也能按 id 还原原文，再按 `startindex/endindex` 截取选中片段。
+- **选项 / 审批在微信里作答**：DSH 弹出 `ask_user_question` 选项卡或审批卡时，插件会把题目和选项同步发到绑定的微信：回序号（`1`、`1,3`）或直接回文字即可作答；审批回 `1`（允许一次）/ `2`（拒绝）。微信里等不到回复（默认 110 秒）就把这次请求交还电脑端弹卡，不会把会话卡死。由 `relayOptions` / `optionReplyTimeoutMs` 控制。
+- **长任务进度提示**：绑定会话的一轮跑得久时，每隔 `progressIntervalMs`（默认 2 分钟）在微信里发一条「⏳ 还在处理：已经思考 X 分 Y 秒（第 N 次进度）」；如果这时正在等你回选项，会改成「⌛ 在等你回复：已经等了 X 分」。轮次结束自动停，不会刷屏。
 - **Agent 工具**：`wechat_login` / `wechat_verify_code` / `wechat_status` / `wechat_bind` / `wechat_unbind` / `wechat_send` / `wechat_send_file` / `wechat_report` / `wechat_logout` / `wechat_simulate` / `wechat_debug`。
 
 ## 安装
@@ -94,7 +96,18 @@ plugin_manager: install_bundle  target=<本目录的绝对路径>
 | `mirrorUserMessages` | `true` | 是否把 GUI 用户消息转发到微信 |
 | `mirrorAssistantMessages` | `true` | 是否把助手回复镜像到微信 |
 | `mirrorIntervalMs` | `1200` | 镜像扫描间隔 |
+| `relayOptions` | `true` | 把 DSH 的选项卡 / 审批卡同步到微信并接受序号回复 |
+| `optionReplyTimeoutMs` | `110000` | 微信里等选项/审批回复的时长，超时交还电脑端弹卡 |
+| `progressHeartbeat` | `true` | 一轮跑得久时在微信里定期报进度（已思考多久） |
+| `progressIntervalMs` | `120000` | 进度提示间隔，最短 30000 |
 | `apiBase` | `https://ilinkai.weixin.qq.com` | iLink 服务地址 |
+
+选项/审批的回复规则：
+
+- 选项题：回 `1`、`2`… 选对应序号；多选回 `1,3`（中英文逗号、顿号都行）；回其他文字当作自定义答案。
+- 审批：回 `1` 允许一次，回 `2` 拒绝；也可回「允许/同意/拒绝/OK/No」。
+- 序号超出范围、单选题回了多个序号时会提示重回，不会把错误答案交给模型。
+- 微信里超时未回：先把提示发给微信，再 `next()` 交还 Web 客户端，电脑端照常弹卡。
 
 状态与凭据写在 `~/.dsh/wechat-bridge/state.json`（0600），日志在同目录 `bridge.log`。
 
