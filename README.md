@@ -33,6 +33,7 @@
 - **思考片段摘要**：模型边想边把推理增量压成一句「💭 思考中：…」发到微信（本地截取、去代码块、按句号/上限截断，**不调模型不耗 token**）；同一会话默认 30 秒最多一条，`turn/end` 清空缓冲，`thinkingSummary: false` 可关。
 - **断联检测**：`/ping`（或 `/health`）在微信里直接查连接：每个账号是否在轮询、最近一次成功轮询多久前、最近错误、镜像与绑定数；snapshot 增加 `health` 供面板显示「连接正常/异常」。后台每 30 秒检查一次，长轮询超过 `healthStaleMs`（默认 120 秒）没成功就自动重启该账号的 monitor（记录 `staleRestarts`），不用手动重扫码；`healthCheck: false` 可关自动重启。
 - **分段发送**（微信不支持流式，只能整段分条发）：长回复按空行段落切分、能合并的段合并、超长段再按句号/长度切，默认每条不超过 `segmentMaxChars`（0 = 用 `maxReplyChars`），相邻条之间隔 `segmentDelayMs`（默认 500ms）；可选 `segmentIndex: true` 加「（1/3）」序号；`segmentMode: length` 可回到旧的纯长度切分。
+- **投递恢复**：发送失败（如 iLink `ret=-2 prepare failed`）的回复自动进补发队列（保留 `pendingTtlMs`，默认 6 小时），任一新消息带回 `context_token` 后**先自动补发**再处理新消息；`/resend` 可手动补发；连续 `sendBreakerThreshold` 次失败后熔断 `sendBreakerMs`（默认 5 分钟）不再撞接口；进度心跳失败会退避 2 分钟、不再刷屏；同一进程同一 stateDir 只保留一个活跃实例（防热重载泄漏出多个轮询/定时器）。
 - **消息插进正在跑的对话**：会话正在跑时（不管是谁发起的），微信里新来的消息用 `steer` 直接插进**当前这一轮**，在下一个 step 边界被模型看到，不用等这一轮结束；会话空闲时才按普通一轮一答处理。插入会给一次「📥 已插入当前对话」回执（10 秒内多次插入只回一次）。
   - 「在跑」的判断：优先 `sessionController.state` 的真实 `running`，其次 `turn/start`・`turn/end` 跟踪；`turnActive` 只是运行时兜底标记，不写入 `state.json`，重启后按会话真实状态重新判断（避免上次没跑完的轮次被当成一直在跑）。
 - **Agent 工具**：`wechat_login` / `wechat_verify_code` / `wechat_status` / `wechat_bind` / `wechat_unbind` / `wechat_send` / `wechat_send_file` / `wechat_report` / `wechat_logout` / `wechat_simulate` / `wechat_debug`。
@@ -104,6 +105,7 @@ plugin_manager: install_bundle  target=<本目录的绝对路径>
 | `/sticker` | 从表情包目录随机发一张图片/GIF；`/sticker 关键词` 按文件名筛；`/sticker 列表` 看目录内容 |
 | `/emotion` | 表情包库：`add [分类]` / `end` / `cancel` / `list [分类]` / `send [分类\|名字]` / `rename 旧 新` / `delete 名字` / `other source true\|false` |
 | `/ping`（`/health`） | 检查微信连接：账号是否在轮询、最近一次成功轮询多久前、最近错误、镜像与绑定数 |
+| `/resend` | 立刻补发队列里没发出去的回复（发送失败自动入队，最多保留 6 小时） |
 | `/models` | 列出可用模型（按厂商分组编号，标出「当前 / 默认」和推理档），并记住这次的序号 |
 | `/model` | 查看当前会话模型与默认模型 |
 | `/model 2` | 切到上次 `/models` 列表的第 2 个模型；`/model 2 high` 同时指定推理档；也可 `/model <provider>/<modelId>` |
@@ -157,6 +159,9 @@ plugin_manager: install_bundle  target=<本目录的绝对路径>
 | `segmentMaxChars` | `0` | 每条消息字符上限，0 = 用 `maxReplyChars`（最短 200） |
 | `segmentDelayMs` | `500` | 相邻两条之间的间隔（毫秒） |
 | `segmentIndex` | `false` | 多条时是否加「（1/3）」序号 |
+| `pendingTtlMs` | `21600000` | 补发队列保留时长（毫秒），过期才丢 |
+| `sendBreakerThreshold` | `5` | 连续发送失败多少次后熔断暂缓 |
+| `sendBreakerMs` | `300000` | 熔断后暂缓时长（毫秒） |
 | `apiBase` | `https://ilinkai.weixin.qq.com` | iLink 服务地址 |
 
 选项/审批的回复规则：

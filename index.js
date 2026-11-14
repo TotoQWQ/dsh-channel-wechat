@@ -32,8 +32,8 @@ const ILINK_APP_ID = 'bot'
 /** 0x000MMNNPP：与官方 2.4.10 对齐 */
 const ILINK_APP_CLIENT_VERSION = (2 << 16) | (4 << 8) | 10
 /** 插件版本：与 package.json 保持一致，出现在 base_info.channel_version 里 */
-const CHANNEL_VERSION = '2.9.0'
-const BOT_AGENT = 'DSH-WeChat/2.9.0'
+const CHANNEL_VERSION = '2.10.0'
+const BOT_AGENT = 'DSH-WeChat/2.10.0'
 /** 媒体 CDN（官方 getUploadUrl 没返回 upload_full_url 时用它拼上传地址） */
 const CDN_BASE = 'https://novac2c.cdn.weixin.qq.com/c2c'
 
@@ -540,6 +540,7 @@ const WECHAT_COMMANDS = new Set([
   'emotion',
   'ping',
   'health',
+  'resend',
   'help',
   '?',
 ])
@@ -560,7 +561,8 @@ const WECHAT_HELP_TEXT = [
   '/approval ask|never  审批策略',
   '/sticker   随机发一张表情包（/sticker 关键词 可筛，/sticker 列表 看目录）',
   '/emotion   表情包库：add / end / list / send / rename / delete / other source true|false',
-  '/ping      检查微信连接是否正常（轮询 / 错误 / 镜像）',
+  '/ping      检查微信连接是否正常（轮询 / 错误 / 镜像 / 待补发）',
+  '/resend    立刻补发队列里没发出去的回复',
   '/stop      停止当前这一轮',
   '/help      这条帮助',
   '',
@@ -680,6 +682,21 @@ function evaluateAccountHealth(account, running, now, staleMs) {
     lastError: String(account?.lastError ?? ''),
   }
 }
+
+/**
+ * 是否为「投递失败」（iLink 拒投，如 ret=-2 prepare failed）。
+ * 这类失败说明回复本身没发出去、已经进了补发队列，就不要再单独发「处理失败」提示。
+ * @param {string} message 错误信息
+ * @returns {boolean} 是否投递失败
+ */
+function isDeliveryError(message) {
+  return /^sendmessage\b/.test(String(message ?? ''))
+}
+
+/** 同一进程里同一 stateDir 只允许一个活跃 channel（防热重载泄漏出多个轮询/定时器）。 */
+const CHANNEL_REGISTRY =
+  globalThis[Symbol.for('dsh-channel-wechat.registry')] ??
+  (globalThis[Symbol.for('dsh-channel-wechat.registry')] = new Map())
 
 /**
  * 会话在微信里的显示名：标题（没有就用 id）+ 末 8 位。
@@ -870,6 +887,21 @@ function normalizeConfig(raw) {
         ? Math.min(5000, Math.floor(c.segmentDelayMs))
         : 500,
     segmentIndex: c.segmentIndex === true,
+    // 补发队列里消息的保留时长：过期才丢（默认 6 小时，避免最终答案被 10 分钟 TTL 丢掉）
+    pendingTtlMs:
+      Number.isFinite(c.pendingTtlMs) && c.pendingTtlMs >= 60_000
+        ? c.pendingTtlMs
+        : 6 * 3600_000,
+    // 连续发送失败多少次后暂缓（避免 token 失效时不断重试触发平台风控）
+    sendBreakerThreshold:
+      Number.isFinite(c.sendBreakerThreshold) && c.sendBreakerThreshold >= 1
+        ? Math.min(20, Math.floor(c.sendBreakerThreshold))
+        : 5,
+    // 暂缓时长
+    sendBreakerMs:
+      Number.isFinite(c.sendBreakerMs) && c.sendBreakerMs >= 60_000
+        ? Math.min(3600_000, c.sendBreakerMs)
+        : 300_000,
     stateDir,
   }
 }
@@ -1803,7 +1835,46 @@ function createChannel(ctx, config) {
     return splitByLength(text, limit)
   }
 
-  async function sendToChat({ accountId, toUserId, contextToken, text }) {
+  // -- 发送熔断：连续失败时暂缓，避免 token 失效时把平台风控越撞越狠 --------
+
+  const sendHealth = new Map()
+
+  function sendPauseRemaining(accountId) {
+    const until = Number(sendHealth.get(accountId)?.pausedUntil ?? 0)
+    return until > Date.now() ? until - Date.now() : 0
+  }
+
+  function noteSendSuccess(accountId) {
+    sendHealth.delete(accountId)
+  }
+
+  function noteSendFailure(accountId, message) {
+    const entry = sendHealth.get(accountId) ?? { failures: 0, pausedUntil: 0 }
+    entry.failures += 1
+    entry.lastError = String(message ?? '')
+    if (entry.failures >= config.sendBreakerThreshold) {
+      entry.pausedUntil = Date.now() + config.sendBreakerMs
+      entry.failures = 0
+      log('warn', 'send paused after repeated failures', { accountId, pausedMs: config.sendBreakerMs })
+    }
+    sendHealth.set(accountId, entry)
+  }
+
+  /** 带动熔断的发送入口；真正的请求在 sendToChatOnce。 */
+  async function sendToChat(args) {
+    const paused = sendPauseRemaining(args?.accountId)
+    if (paused > 0) throw new Error(`发送暂缓：连续失败过多，${Math.ceil(paused / 1000)} 秒后自动恢复`)
+    try {
+      const result = await sendToChatOnce(args)
+      noteSendSuccess(args?.accountId)
+      return result
+    } catch (err) {
+      noteSendFailure(args?.accountId, err?.message ?? err)
+      throw err
+    }
+  }
+
+  async function sendToChatOnce({ accountId, toUserId, contextToken, text }) {
     const account = state.accounts[accountId]
     if (!account?.botToken) throw new Error('账号未登录或已移除')
     const formatted = formatWechatText(text, { maxLine: config.formatMaxLine })
@@ -2066,8 +2137,10 @@ function createChannel(ctx, config) {
     )
   }
 
-  /** 队列里的旧消息不再补发：超过 PENDING_TTL_MS 的直接丢弃，避免刷屏。 */
-  const PENDING_TTL_MS = 10 * 60_000
+  /** 队列里的旧消息超过 pendingTtlMs 才丢；最终答案不再 10 分钟就过期。 */
+  function pendingTtl() {
+    return config.pendingTtlMs
+  }
 
   // -- 跨账号转发：A 号收到的消息也送到 B 号的聊天 --------------------------
 
@@ -2165,13 +2238,27 @@ function createChannel(ctx, config) {
     return sent
   }
 
+  /** 入站带回新 context_token 时补发旧队列；失败不阻断这条消息的处理。 */
+  async function flushPendingOnInbound(binding) {
+    if ((binding.pending?.length ?? 0) === 0) return 0
+    binding.nextRetryAt = 0
+    try {
+      const flushed = await flushPending(binding)
+      if (flushed > 0) log('info', 'pending flushed on inbound', { key: binding.key, flushed })
+      return flushed
+    } catch (err) {
+      log('warn', 'pending flush on inbound failed', { key: binding.key, error: String(err?.message ?? err) })
+      return 0
+    }
+  }
+
   async function flushPending(binding) {
     let queue = normalizePending(binding.pending).filter((item) => item.text)
     if (queue.length === 0) {
       binding.pending = []
       return 0
     }
-    const fresh = queue.filter((item) => Date.now() - item.at <= PENDING_TTL_MS)
+    const fresh = queue.filter((item) => Date.now() - item.at <= pendingTtl())
     const dropped = queue.length - fresh.length
     if (dropped > 0) {
       log('warn', 'pending expired, dropped', { key: binding.key, dropped })
@@ -3140,11 +3227,37 @@ function createChannel(ctx, config) {
         )
         if (item.lastError) lines.push(`　错误：${item.lastError}`)
       }
-      lines.push(`镜像：${mirrorTimer ? '运行中' : '未运行'} · 绑定会话：${Object.keys(state.bindings).length}`)
+      lines.push(
+        `镜像：${mirrorTimer ? '运行中' : '未运行'} · 绑定会话：${Object.keys(state.bindings).length}` +
+          ` · 待补发：${Object.values(state.bindings).reduce((sum, item) => sum + normalizePending(item.pending).length, 0)}`,
+      )
       if (!health.ok && health.accounts.length > 0) {
         lines.push('（长期卡住会自动重启该账号的轮询，仍不行就重扫码）')
       }
       await replyText(binding, lines.join('\n'))
+      return true
+    }
+    if (name === 'resend') {
+      const before = normalizePending(binding.pending).length
+      if (before === 0) {
+        await replyText(binding, '当前没有待补发的消息。')
+        return true
+      }
+      binding.nextRetryAt = 0
+      let sent = 0
+      try {
+        sent = await flushPending(binding)
+      } catch (err) {
+        await replyText(binding, `⚠️ 补发失败：${String(err?.message ?? err)}`)
+        return true
+      }
+      const left = normalizePending(binding.pending).length
+      await replyText(
+        binding,
+        sent > 0
+          ? `✅ 已补发 ${sent} 条${left > 0 ? `，还有 ${left} 条没发出去` : ''}`
+          : `⚠️ 还是发不出去（剩 ${left} 条）。让对方给机器人发一条消息刷新上下文后再试，或稍等自动重试。`,
+      )
       return true
     }
     if (name === 'stop') {
@@ -3606,7 +3719,8 @@ function createChannel(ctx, config) {
       binding.lastOutboundAt = Date.now()
       return true
     } catch (err) {
-      // 进度提示是尽力而为：失败不排队，避免恢复后一次性刷屏
+      // 进度提示是尽力而为：失败不排队，避免恢复后一次性刷屏；暂时退避 2 分钟再说
+      binding.progressRetryAfter = Date.now() + 120_000
       log('warn', 'progress send failed', { key: binding.key, error: String(err?.message ?? err) })
       return false
     }
@@ -3630,6 +3744,7 @@ function createChannel(ctx, config) {
       turn.beats += 1
       const label = formatDuration(elapsed)
       for (const binding of targets) {
+        if (Number(binding.progressRetryAfter ?? 0) > now) continue
         const waiting = optionWaits.get(binding.key)
         const text = waiting
           ? `⌛ 在等你回复：已经等了 ${label}\n回复对应序号即可继续；超时会转回电脑端处理。`
@@ -3752,6 +3867,11 @@ function createChannel(ctx, config) {
     const text = await describeInbound(accountId, chatId, msg)
     if (!text) return { empty: true }
 
+    // 先更新绑定（拿到这条消息带回来的新 context_token），再把之前没发出去的回复补发掉，
+    // 这样命令、选项回复、普通消息都不会被旧的发送失败卡住。
+    const binding = ensureBinding(accountId, chatId, fromUserId, String(msg?.context_token ?? ''))
+    await flushPendingOnInbound(binding)
+
     // 有选项/审批在等微信回复：这条消息当作答案消费掉，不再转发给会话
     const waiting = optionReplyWaiter(accountId, chatId)
     if (waiting) {
@@ -3763,17 +3883,13 @@ function createChannel(ctx, config) {
     // 会话命令：/sessions /use /new /current /help；表外的 /xxx 照常转发给会话
     const command = parseWechatCommand(text)
     if (command) {
-      const bindingForCommand =
-        state.bindings[bindingKeyOf(accountId, chatId)] ??
-        ensureBinding(accountId, chatId, fromUserId, String(msg?.context_token ?? ''))
       log('info', 'wechat command', { accountId, chatId, command: command.name })
-      await handleSessionCommand(bindingForCommand, command)
+      await handleSessionCommand(binding, command)
       return { command: command.name }
     }
 
     // 记下这条入站原文供后续「引用」回查；用干净摘要（不带本地媒体路径）
     rememberQuote(accountId, chatId, msg?.message_id, relaySummary(msg) || text)
-    const binding = ensureBinding(accountId, chatId, fromUserId, String(msg?.context_token ?? ''))
     const signal = monitors.get(accountId)?.abort?.signal ?? new AbortController().signal
 
     // 会话正在跑：把这条消息直接插进当前对话（steer），不再排在这一轮后面等
@@ -3816,10 +3932,14 @@ function createChannel(ctx, config) {
       } catch (err) {
         const message = String(err?.message ?? err)
         log('error', 'turn failed', { accountId, chatId, error: message })
-        try {
-          await sendToBinding(binding, `⚠️ DSH 处理失败：${message}`)
-        } catch {
-          /* ignore */
+        // 投递失败时回复已经进了补发队列，别再往队列里塞一条「处理失败」刷屏；
+        // 其它错误才给用户一句提示，并且用尽力而为的通道（失败不排队）。
+        if (!isDeliveryError(message)) {
+          try {
+            await sendProgressMessage(binding, `⚠️ DSH 处理失败：${message}`)
+          } catch {
+            /* ignore */
+          }
         }
         return { ok: false, error: message }
       }
@@ -4214,6 +4334,21 @@ function createChannel(ctx, config) {
   }
 
   function start() {
+    // 热重载可能留下旧实例：同一 stateDir 只允许一个活跃 channel，先把旧的停掉
+    const previous = CHANNEL_REGISTRY.get(config.stateDir)
+    if (previous && previous !== channel) {
+      try {
+        log('warn', 'replacing previous channel instance', { stateDir: config.stateDir })
+      } catch {
+        /* ignore */
+      }
+      try {
+        previous.stop()
+      } catch {
+        /* ignore */
+      }
+    }
+    CHANNEL_REGISTRY.set(config.stateDir, channel)
     loadState()
     loadQuotes()
     ensureStickerDir()
@@ -4237,9 +4372,10 @@ function createChannel(ctx, config) {
       saveTimer = null
     }
     saveState(true)
+    if (CHANNEL_REGISTRY.get(config.stateDir) === channel) CHANNEL_REGISTRY.delete(config.stateDir)
   }
 
-  return {
+  const channel = {
     start,
     stop,
     startLogin,
@@ -4259,6 +4395,9 @@ function createChannel(ctx, config) {
     healthTick,
     staleAccountIds,
     progressTick,
+    flushPending,
+    running: () => Boolean(progressTimer || mirrorTimer || healthTimer),
+    sendHealth: () => Object.fromEntries(sendHealth),
     isSessionBusy,
     usageOf,
     saveEmotionBuffer,
@@ -4390,6 +4529,8 @@ function createChannel(ctx, config) {
       }
     },
   }
+
+  return channel
 }
 
 // ---------------------------------------------------------------------------
@@ -4857,6 +4998,7 @@ export const __test = {
   sanitizeEmotionStem,
   summarizeThinkingDelta,
   evaluateAccountHealth,
+  isDeliveryError,
   segmentText,
   splitByLength,
   decorateReply,
