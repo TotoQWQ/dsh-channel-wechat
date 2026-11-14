@@ -6,6 +6,19 @@
 
 ---
 
+## 2.20.2 — 2026-11-15
+
+### 诊断
+
+- `emotion classify no-match` 增加 `finish` 字段（模型 finish chunk），用于判断是不是「不支持图片」等原因导致空回复。
+- 新增 `GET /wechat-channel/llm-models`：列出 provider、模型和 inputModalities，便于确认默认模型是否支持图片。
+
+### 变更
+
+- 版本 2.20.1 → 2.20.2。
+
+---
+
 ## 2.20.1 — 2026-11-15
 
 ### 修复/诊断

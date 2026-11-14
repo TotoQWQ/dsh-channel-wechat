@@ -37,8 +37,8 @@ const ILINK_APP_ID = 'bot'
 /** 0x000MMNNPP：与官方 2.4.10 对齐 */
 const ILINK_APP_CLIENT_VERSION = (2 << 16) | (4 << 8) | 10
 /** 插件版本：与 package.json 保持一致，出现在 base_info.channel_version 里 */
-const CHANNEL_VERSION = '2.20.1'
-const BOT_AGENT = 'DSH-WeChat/2.20.1'
+const CHANNEL_VERSION = '2.20.2'
+const BOT_AGENT = 'DSH-WeChat/2.20.2'
 /** 媒体 CDN（官方 getUploadUrl 没返回 upload_full_url 时用它拼上传地址） */
 const CDN_BASE = 'https://novac2c.cdn.weixin.qq.com/c2c'
 
@@ -3126,6 +3126,7 @@ function createChannel(ctx, config) {
       const controller = new AbortController()
       const timer = setTimeout(() => controller.abort(), 20_000)
       const text = []
+      let finishChunk = null
       try {
         const stream = llm.stream({
           provider: selection.provider,
@@ -3148,7 +3149,10 @@ function createChannel(ctx, config) {
         })
         for await (const chunk of stream) {
           if (chunk?.type === 'text-delta' && typeof chunk.text === 'string') text.push(chunk.text)
-          if (chunk?.type === 'finish') break
+          if (chunk?.type === 'finish') {
+            finishChunk = chunk
+            break
+          }
         }
       } finally {
         clearTimeout(timer)
@@ -3156,7 +3160,11 @@ function createChannel(ctx, config) {
       const answer = text.join('').trim()
       const matched = EMOTION_CATEGORIES.find((category) => answer.includes(category))
       if (matched) log('info', 'emotion classified', { category: matched, provider: selection.provider, model: selection.model })
-      else log('warn', 'emotion classify no-match', { answer: answer.slice(0, 200) })
+      else
+        log('warn', 'emotion classify no-match', {
+          answer: answer.slice(0, 200),
+          finish: finishChunk ? JSON.stringify(finishChunk).slice(0, 300) : null,
+        })
       return matched ?? null
     } catch (err) {
       log('warn', 'emotion classify failed', { error: String(err?.message ?? err) })
@@ -5385,6 +5393,24 @@ function createChannel(ctx, config) {
       }
       if (method === 'POST' && route === 'reload') {
         return json(res, await hotReloadPlugin('http'))
+      }
+      if (method === 'GET' && route === 'llm-models') {
+        const llm = ctx.get('llm')
+        if (!llm?.listProviders) return json(res, { error: '没有 llm 服务' }, 400)
+        const providers = await llm.listProviders()
+        const out = []
+        for (const provider of Array.isArray(providers) ? providers : []) {
+          const id = provider?.id ?? provider?.provider ?? provider?.name ?? String(provider)
+          let models = []
+          try {
+            models = await llm.listModels?.(id)
+          } catch (err) {
+            models = [{ error: String(err?.message ?? err) }]
+          }
+          out.push({ id, provider, models })
+        }
+        const selection = ctx.get('agentDefaultModel')?.currentSelection?.() ?? null
+        return json(res, { selection, providers: out })
       }
       if (method === 'GET' && route === 'classify') {
         const filePath = url.searchParams.get('path') || ''
