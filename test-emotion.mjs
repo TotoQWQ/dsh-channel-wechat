@@ -180,13 +180,31 @@ try {
     const first = channel.saveEmotionBuffer(png, '.png', { category: '开心', source: 'user', name: 'haha' })
     assert.equal(first.file, '开心/haha.png')
     assert.ok(fs.existsSync(path.join(emotionDir, first.file)))
-    const second = channel.saveEmotionBuffer(png, '.png', { category: '开心', source: 'user', name: 'haha' })
+    const duplicate = channel.saveEmotionBuffer(png, '.png', { category: '开心', source: 'user', name: 'haha' })
+    assert.equal(duplicate.duplicate, true, '相同内容不应重复落盘')
+    assert.equal(duplicate.file, '开心/haha.png')
+    assert.ok(!fs.existsSync(path.join(emotionDir, '开心', 'haha_2.png')))
+    const second = channel.saveEmotionBuffer(Buffer.concat([png, Buffer.from([1])]), '.png', { category: '开心', source: 'user', name: 'haha' })
     assert.equal(second.file, '开心/haha_2.png')
-    const builtin = channel.saveEmotionBuffer(png, '.png', { category: '开心', source: 'builtin', name: '内置' })
+    const builtin = channel.saveEmotionBuffer(Buffer.concat([png, Buffer.from([2])]), '.png', { category: '开心', source: 'builtin', name: '内置' })
     assert.equal(builtin.source, 'builtin')
     assert.ok(fs.existsSync(path.join(emotionDir, 'index.json')))
     assert.equal(channel.listEmotionEntries('开心', false).length, 2, '默认不含外来来源')
     assert.equal(channel.listEmotionEntries('开心', true).length, 3)
+  })
+
+  await check('/emotion dedupe 删除内容相同的副本', async () => {
+    const idxFile = path.join(emotionDir, 'index.json')
+    const idx = JSON.parse(fs.readFileSync(idxFile, 'utf8'))
+    const src = idx.stickers['开心/haha_2.png']
+    fs.copyFileSync(path.join(emotionDir, src.file), path.join(emotionDir, '开心', 'dup_copy.png'))
+    idx.stickers['开心/dup_copy.png'] = { ...src, file: '开心/dup_copy.png', name: 'dup_copy', addedAt: src.addedAt + 1 }
+    fs.writeFileSync(idxFile, JSON.stringify(idx), 'utf8')
+    channel.loadEmotions()
+    const result = channel.dedupeEmotions()
+    assert.ok(result.removed.includes('开心/dup_copy.png'))
+    assert.ok(!fs.existsSync(path.join(emotionDir, '开心', 'dup_copy.png')))
+    assert.equal(result.total, 3)
   })
 
   await check('/emotion add → end 流程与分类计数', async () => {

@@ -37,8 +37,8 @@ const ILINK_APP_ID = 'bot'
 /** 0x000MMNNPP：与官方 2.4.10 对齐 */
 const ILINK_APP_CLIENT_VERSION = (2 << 16) | (4 << 8) | 10
 /** 插件版本：与 package.json 保持一致，出现在 base_info.channel_version 里 */
-const CHANNEL_VERSION = '2.20.3'
-const BOT_AGENT = 'DSH-WeChat/2.20.3'
+const CHANNEL_VERSION = '2.21.0'
+const BOT_AGENT = 'DSH-WeChat/2.21.0'
 /** 媒体 CDN（官方 getUploadUrl 没返回 upload_full_url 时用它拼上传地址） */
 const CDN_BASE = 'https://novac2c.cdn.weixin.qq.com/c2c'
 
@@ -618,6 +618,7 @@ const EMOTION_HELP_TEXT = [
   '/emotion send [分类|名字]  手动发 1–2 张',
   '/emotion rename 旧名 新名 [备注]   重命名（备注会拼进文件名）',
   '/emotion note 名字 备注      给表情包加备注（重命名文件）',
+  '/emotion dedupe         按内容去重（保留最早的一张）',
   '/emotion delete 名字       删除',
   '/emotion other source true|false  是否允许外来表情包（默认 false）',
   `分类：${EMOTION_CATEGORIES.join(' / ')}`,
@@ -3185,17 +3186,40 @@ function createChannel(ctx, config) {
     return config.emotionAllowOtherSource === true
   }
 
+  /** 图片魔数 → 规范扩展名；不是支持的图片返回 null（学自 meme_manager 的「校验内容而非扩展名」）。 */
+  function imageExtFromBuffer(buffer) {
+    if (!buffer || buffer.length < 4) return null
+    const b = buffer
+    if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return '.png'
+    if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return '.jpg'
+    if (b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46) return '.gif'
+    if (b.length >= 12 && b.toString('ascii', 0, 4) === 'RIFF' && b.toString('ascii', 8, 12) === 'WEBP') return '.webp'
+    return null
+  }
+
+  /** 内容 SHA-256（去重键）。 */
+  function hashEmotionBuffer(buffer) {
+    return crypto.createHash('sha256').update(buffer).digest('hex')
+  }
+
   /**
    * 保存一张表情包到分类目录并登记索引。
+   * 会先校验图片魔数、按内容 SHA-256 去重；重复时返回已有条目并带 `duplicate: true`。
    * @param {Buffer} buffer 文件内容
    * @param {string} ext 扩展名（含点）
    * @param {{ category?: string, source?: string, name?: string }} [options]
    * @returns {object} 索引条目
    */
   function saveEmotionBuffer(buffer, ext, options = {}) {
+    const detected = imageExtFromBuffer(buffer)
+    if (!detected) throw new Error('不是支持的图片（png/jpg/gif/webp）')
+    if (buffer.length > 20 * 1024 * 1024) throw new Error('图片超过 20MB')
+    const digest = hashEmotionBuffer(buffer)
+    const existing = Object.values(emotionIndex.stickers).find((entry) => entry.sha256 === digest)
+    if (existing) return { ...existing, duplicate: true }
     const category = EMOTION_CATEGORIES.includes(options.category) ? options.category : '其他'
     const dir = emotionCategoryDir(category)
-    const suffix = String(ext || '.png').toLowerCase().replace(/[^.a-z0-9]/g, '') || '.png'
+    const suffix = detected
     const stem = sanitizeEmotionStem(options.name)
     let file = `${stem}${suffix}`
     let index = 2
@@ -3213,6 +3237,7 @@ function createChannel(ctx, config) {
       source: options.source === 'builtin' ? 'builtin' : 'user',
       addedAt: Date.now(),
       bytes: buffer.length,
+      sha256: digest,
     }
     saveEmotions()
     return emotionIndex.stickers[rel]
@@ -3290,6 +3315,41 @@ function createChannel(ctx, config) {
     delete emotionIndex.stickers[entry.file]
     saveEmotions()
     return { ok: true }
+  }
+
+  /**
+   * 按内容 SHA-256 去重：保留最早收录的一张，删除重复文件与索引，并补全缺失的哈希。
+   * 顺带清理索引里文件已不存在的条目。
+   * @returns {{ removed: string[], total: number }}
+   */
+  function dedupeEmotions() {
+    const entries = Object.values(emotionIndex.stickers).sort((a, b) => Number(a.addedAt ?? 0) - Number(b.addedAt ?? 0))
+    const seen = new Map()
+    const removed = []
+    for (const entry of entries) {
+      const abs = path.join(config.emotionDir, entry.file)
+      let digest = entry.sha256
+      try {
+        digest = hashEmotionBuffer(fs.readFileSync(abs))
+        entry.sha256 = digest
+      } catch {
+        delete emotionIndex.stickers[entry.file]
+        continue
+      }
+      if (seen.has(digest)) {
+        try {
+          fs.unlinkSync(abs)
+        } catch {
+          /* 文件没了也删索引 */
+        }
+        delete emotionIndex.stickers[entry.file]
+        removed.push(entry.file)
+      } else {
+        seen.set(digest, entry)
+      }
+    }
+    saveEmotions()
+    return { removed, total: Object.keys(emotionIndex.stickers).length }
   }
 
   /** 手动/自动发某个分类里的 1–2 张表情包。 */
@@ -3370,6 +3430,7 @@ function createChannel(ctx, config) {
       (item) => Number(item?.type) === 2,
     )
     const saved = []
+    const duplicates = []
     for (const item of items) {
       try {
         const media = await downloadInboundMedia(item)
@@ -3384,12 +3445,13 @@ function createChannel(ctx, config) {
           source: 'user',
           name: media.fileName || `表情_${Date.now()}`,
         })
-        saved.push(entry)
         try {
           fs.unlinkSync(media.file)
         } catch {
           /* 临时文件删不掉就算了 */
         }
+        if (entry.duplicate) duplicates.push(entry)
+        else saved.push(entry)
       } catch (err) {
         log('warn', 'emotion upload failed', { key: binding.key, error: String(err?.message ?? err) })
       }
@@ -3401,11 +3463,14 @@ function createChannel(ctx, config) {
     const summary = Object.entries(counts)
       .map(([name, count]) => `${name} ${count}`)
       .join('、')
+    const duplicateNote = duplicates.length > 0 ? `，跳过 ${duplicates.length} 张重复` : ''
     await replyText(
       binding,
       saved.length > 0
-        ? `🧸 已收录 ${saved.length} 张${summary ? `（${summary}）` : ''}（本次共 ${binding.emotionUpload.count} 张）。继续发，或 /emotion end 结束。`
-        : '⚠️ 这张没存下来（下载/解密失败）。可以再发一张，或 /emotion end 结束。',
+        ? `🧸 已收录 ${saved.length} 张${summary ? `（${summary}）` : ''}${duplicateNote}（本次共 ${binding.emotionUpload.count} 张）。继续发，或 /emotion end 结束。`
+        : duplicates.length > 0
+          ? `ℹ️ 这张已经在「${duplicates[0].category}」里了，没有重复收录${duplicateNote}。继续发，或 /emotion end 结束。`
+          : '⚠️ 这张没存下来（下载/解密失败，或不是支持的图片）。可以再发一张，或 /emotion end 结束。',
     )
     return saved.length
   }
@@ -4378,6 +4443,11 @@ function createChannel(ctx, config) {
             : String(entry.name)
         const result = renameEmotion(name, base, note)
         await replyText(binding, result.ok ? `✅ 已加备注「${result.entry.name}」` : `⚠️ ${result.message}`)
+        return true
+      }
+      if (sub === 'dedupe' || sub === '去重') {
+        const result = dedupeEmotions()
+        await replyText(binding, `🧹 去重完成：删除 ${result.removed.length} 张重复，剩余 ${result.total} 张。`)
         return true
       }
       if (sub === 'delete' || sub === 'rm' || sub === '删除') {
@@ -5655,6 +5725,9 @@ function createChannel(ctx, config) {
     emotionSummary,
     captureEmotionUpload,
     classifyEmotionBuffer,
+  dedupeEmotions,
+  loadEmotions,
+  hashEmotionBuffer,
     waitingOptions: () => optionWaits.size,
     handleHttp,
     sendToChat,
