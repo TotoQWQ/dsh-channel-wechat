@@ -32,8 +32,8 @@ const ILINK_APP_ID = 'bot'
 /** 0x000MMNNPP：与官方 2.4.10 对齐 */
 const ILINK_APP_CLIENT_VERSION = (2 << 16) | (4 << 8) | 10
 /** 插件版本：与 package.json 保持一致，出现在 base_info.channel_version 里 */
-const CHANNEL_VERSION = '2.7.0'
-const BOT_AGENT = 'DSH-WeChat/2.7.0'
+const CHANNEL_VERSION = '2.7.1'
+const BOT_AGENT = 'DSH-WeChat/2.7.1'
 /** 媒体 CDN（官方 getUploadUrl 没返回 upload_full_url 时用它拼上传地址） */
 const CDN_BASE = 'https://novac2c.cdn.weixin.qq.com/c2c'
 
@@ -2378,7 +2378,17 @@ function createChannel(ctx, config) {
     if (!session) return null
     let entry = usageStats.get(sessionId)
     if (!entry) {
-      entry = { throughSeq: 0, totalTokens: 0, inputTokens: 0, outputTokens: 0, days: {}, lastTurnTokens: 0 }
+      entry = {
+        throughSeq: 0,
+        totalTokens: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        days: {},
+        cacheDays: {},
+        lastTurnTokens: 0,
+        lastTurnCacheReadTokens: 0,
+      }
       usageStats.set(sessionId, entry)
     }
     const end = Number(session.seq ?? 0)
@@ -2393,16 +2403,21 @@ function createChannel(ctx, config) {
         if (event?.type !== 'assistant/message') continue
         const usage = event.data?.usage
         if (!usage) continue
-        const total = Number(
-          usage.totalTokens ?? Number(usage.inputTokens ?? 0) + Number(usage.outputTokens ?? 0),
-        )
-        if (!Number.isFinite(total) || total <= 0) continue
-        entry.totalTokens += total
-        entry.inputTokens += Number(usage.inputTokens ?? 0) || 0
-        entry.outputTokens += Number(usage.outputTokens ?? 0) || 0
-        entry.lastTurnTokens = total
+        // 计费口径：未缓存输入 + 输出；cacheReadTokens（上下文缓存命中）单列，不混进"计费 token"
+        const input = Number(usage.inputTokens ?? 0) || 0
+        const output = Number(usage.outputTokens ?? 0) || 0
+        const cacheRead = Number(usage.cacheReadTokens ?? 0) || 0
+        const billed = input + output
+        if (billed <= 0 && cacheRead <= 0) continue
+        entry.inputTokens += input
+        entry.outputTokens += output
+        entry.cacheReadTokens += cacheRead
+        entry.totalTokens += billed
+        entry.lastTurnTokens = billed
+        entry.lastTurnCacheReadTokens = cacheRead
         const day = new Date(Number(event.time ?? Date.now())).toLocaleDateString('sv-SE')
-        entry.days[day] = (entry.days[day] ?? 0) + total
+        entry.days[day] = (entry.days[day] ?? 0) + billed
+        entry.cacheDays[day] = (entry.cacheDays[day] ?? 0) + cacheRead
       }
       entry.throughSeq = end
       const keys = Object.keys(entry.days).sort()
@@ -2413,8 +2428,11 @@ function createChannel(ctx, config) {
       totalTokens: entry.totalTokens,
       inputTokens: entry.inputTokens,
       outputTokens: entry.outputTokens,
+      cacheReadTokens: entry.cacheReadTokens,
       todayTokens: entry.days[today] ?? 0,
+      todayCacheReadTokens: entry.cacheDays[today] ?? 0,
       lastTurnTokens: entry.lastTurnTokens,
+      lastTurnCacheReadTokens: entry.lastTurnCacheReadTokens,
       throughSeq: entry.throughSeq,
     }
   }
@@ -2990,7 +3008,7 @@ function createChannel(ctx, config) {
       const usage = usageOf(binding.sessionId)
       if (usage) {
         lines.push(
-          `用量：${formatTokens(usage.totalTokens)} token（今日 ${formatTokens(usage.todayTokens)}，上轮 ${formatTokens(usage.lastTurnTokens)}）`,
+          `用量：${formatTokens(usage.totalTokens)} token（输入 ${formatTokens(usage.inputTokens)} / 输出 ${formatTokens(usage.outputTokens)} / 缓存读取 ${formatTokens(usage.cacheReadTokens)}；今日 ${formatTokens(usage.todayTokens)}，上轮 ${formatTokens(usage.lastTurnTokens)}）`,
         )
       }
       if (state) {

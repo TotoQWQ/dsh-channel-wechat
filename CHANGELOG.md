@@ -6,6 +6,23 @@
 
 ---
 
+## 2.7.1 — 2026-11-14
+
+### 修复
+
+- **token 统计口径**：DSH 会话事件里的 `usage.totalTokens` 包含 `cacheReadTokens`（上下文缓存命中）。之前把它全额计入「总量」，长会话里缓存读取可达数亿，面板显示严重虚高。
+  - 现在计费口径 = `inputTokens + outputTokens`（未缓存输入 + 输出）；
+  - `cacheReadTokens` 单列累计（含按天），面板显示「输入+输出」主行 + 「缓存 X / 今日 Y / 上轮 Z」次行；
+  - `/status` 的「用量」行显示输入 / 输出 / 缓存读取三项；
+  - `usageOf` 返回 `cacheReadTokens` / `todayCacheReadTokens` / `lastTurnCacheReadTokens`。
+- `test-usage.mjs` 增加「缓存读取单列、不混进计费 token」用例（6 项）。
+
+### 变更
+
+- 版本 2.7.0 → 2.7.1（`CHANNEL_VERSION` / `bot_agent` 同步）。
+
+---
+
 ## 2.7.0 — 2026-11-14
 
 ### 新增

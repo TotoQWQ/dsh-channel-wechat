@@ -147,6 +147,23 @@ try {
     assert.match(reply, /用量：250 token/)
     assert.match(reply, /今日 250/)
   })
+
+  await check('缓存读取单列，不混进计费 token', async () => {
+    session.events.push({
+      type: 'assistant/message',
+      seq: 4,
+      time: now,
+      data: { turn: 3, usage: { inputTokens: 10, outputTokens: 0, cacheReadTokens: 5000, totalTokens: 5010 } },
+    })
+    session.seq = 5
+    const usage = channel.usageOf(sessionId)
+    assert.equal(usage.totalTokens, 260)
+    assert.equal(usage.inputTokens, 120)
+    assert.equal(usage.outputTokens, 140)
+    assert.equal(usage.cacheReadTokens, 5000)
+    assert.equal(usage.todayTokens, 260)
+    assert.equal(usage.todayCacheReadTokens, 5000)
+  })
 } finally {
   channel.stop()
   server.closeAllConnections?.()

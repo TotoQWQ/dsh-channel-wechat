@@ -607,11 +607,11 @@ window.__ModuleLoader__.load({
                           ? h(
                               'div',
                               { style: { fontSize: 12, whiteSpace: 'nowrap' } },
-                              `${formatTokens(binding.usage.totalTokens)} 总`,
+                              `${formatTokens(binding.usage.totalTokens)} 输入+输出`,
                               h(
                                 'div',
                                 { style: { ...styles.muted, fontSize: 11 } },
-                                `今日 ${formatTokens(binding.usage.todayTokens)} · 上轮 ${formatTokens(binding.usage.lastTurnTokens)}`,
+                                `缓存 ${formatTokens(binding.usage.cacheReadTokens)} · 今日 ${formatTokens(binding.usage.todayTokens)} · 上轮 ${formatTokens(binding.usage.lastTurnTokens)}`,
                               ),
                             )
                           : h('span', { style: styles.muted }, '—'),
