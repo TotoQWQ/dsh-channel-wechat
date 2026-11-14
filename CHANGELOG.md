@@ -6,6 +6,23 @@
 
 ---
 
+## 2.4.8 — 2026-11-14
+
+### 新增
+
+- **`/rename <标题>`（`/title`）**：给当前会话改名（`sessionController.rename`，最多 60 字），自动会话会先 `ensureSession` 再改名。
+- **`/history [N]`（`/hist`）**：用 `sessionController.events` 冷读当前会话最近 N 条对话（默认 6、最多 20），按「你：…」「DSH：…」列出，单条截断 140 字；冷会话也能读，不需要先打开。
+- **`/search <关键词>`（`/find`）**：`sessionController.search({ query })` 跨会话搜历史，列出命中的会话（标题 · id 后 8 位）与片段，并把命中 id 写进 `sessionOptions`，可直接 `/use 1` 切过去。
+- **`/approval [ask|never]`（`/policy`）**：无参数读 `approval.overrideOf(session)` 显示当前策略（未覆盖时显示 ask 默认）；带参数时用 `approval.setPolicy(agent, 'ask'|'never')` 切换，回执「随会话保存，下一轮生效」；会话没打开时明确提示。
+- `/help` 文本同步补上四条；命令白名单扩到 `rename / title / history / hist / search / find / approval / policy`。
+- 新自测 `test-extra.mjs`（8 项：历史两种角色、改名与缺参、搜索与 `/use` 联动、审批查看/切换/非法参数、帮助覆盖）。
+
+### 变更
+
+- 版本 2.4.7 → 2.4.8（`CHANNEL_VERSION` / `bot_agent` 同步）。
+
+---
+
 ## 2.4.7 — 2026-11-14
 
 ### 新增

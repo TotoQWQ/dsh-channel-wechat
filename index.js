@@ -32,8 +32,8 @@ const ILINK_APP_ID = 'bot'
 /** 0x000MMNNPP：与官方 2.4.10 对齐 */
 const ILINK_APP_CLIENT_VERSION = (2 << 16) | (4 << 8) | 10
 /** 插件版本：与 package.json 保持一致，出现在 base_info.channel_version 里 */
-const CHANNEL_VERSION = '2.4.7'
-const BOT_AGENT = 'DSH-WeChat/2.4.7'
+const CHANNEL_VERSION = '2.4.8'
+const BOT_AGENT = 'DSH-WeChat/2.4.8'
 /** 媒体 CDN（官方 getUploadUrl 没返回 upload_full_url 时用它拼上传地址） */
 const CDN_BASE = 'https://novac2c.cdn.weixin.qq.com/c2c'
 
@@ -437,6 +437,14 @@ const WECHAT_COMMANDS = new Set([
   'model',
   'status',
   'stop',
+  'rename',
+  'title',
+  'history',
+  'hist',
+  'search',
+  'find',
+  'approval',
+  'policy',
   'help',
   '?',
 ])
@@ -448,9 +456,13 @@ const WECHAT_HELP_TEXT = [
   '/use 2     切到第 2 个会话',
   '/new       换到新会话',
   '/current   查看当前会话',
+  '/rename 标题  给当前会话改名',
+  '/history 6  看最近 6 条对话',
+  '/search 关键词  跨会话搜历史',
   '/models    列出可用模型',
   '/model 2   切换模型（可带推理档：/model 2 high）',
   '/status    会话状态（模型 / 运行 / 队列）',
+  '/approval ask|never  审批策略',
   '/stop      停止当前这一轮',
   '/help      这条帮助',
   '',
@@ -2303,6 +2315,147 @@ function createChannel(ctx, config) {
         log('info', 'cancel requested from wechat', { key: binding.key, sessionId: binding.sessionId })
       } catch (err) {
         await replyText(binding, `⚠️ 停止失败：${String(err?.message ?? err)}`)
+      }
+      return true
+    }
+    if (name === 'rename' || name === 'title') {
+      const title = String(command.args ?? '').trim().slice(0, 60)
+      if (!title) {
+        await replyText(binding, '用法：/rename 新标题')
+        return true
+      }
+      const controller = ctx.get('sessionController')
+      if (!controller?.rename) {
+        await replyText(binding, '⚠️ 这个 DSH 版本不支持改名。')
+        return true
+      }
+      try {
+        await ensureSession(binding.sessionId)
+        const result = await controller.rename({ sessionId: binding.sessionId, title })
+        await replyText(binding, `✅ 会话已改名为：${result?.title ?? title}`)
+        log('info', 'session renamed from wechat', { key: binding.key, sessionId: binding.sessionId, title })
+      } catch (err) {
+        await replyText(binding, `⚠️ 改名失败：${String(err?.message ?? err)}`)
+      }
+      return true
+    }
+    if (name === 'history' || name === 'hist') {
+      const requested = Number(command.args)
+      const count = Number.isFinite(requested) && requested > 0 ? Math.min(20, Math.trunc(requested)) : 6
+      const controller = ctx.get('sessionController')
+      if (!controller?.events) {
+        await replyText(binding, '⚠️ 这个 DSH 版本读不了历史。')
+        return true
+      }
+      try {
+        const page = await controller.events(
+          { address: { kind: 'session', sessionId: binding.sessionId }, maxMessages: count * 4 },
+          new AbortController().signal,
+        )
+        const records = Array.isArray(page?.records) ? page.records : []
+        const rows = []
+        for (const record of records) {
+          const event = record?.event ?? record
+          const type = String(event?.type ?? '')
+          if (type !== 'user/message' && type !== 'assistant/message') continue
+          const data = event.data ?? {}
+          const message = type === 'assistant/message' ? data.message : data
+          const text = textOfMessage(message)
+          if (!text) continue
+          rows.push({ role: type === 'user/message' ? '你' : 'DSH', text })
+        }
+        const tail = rows.slice(-count)
+        if (tail.length === 0) {
+          await replyText(binding, '（这段会话里还没有可读的对话）')
+          return true
+        }
+        const lines = [`📜 最近 ${tail.length} 条`]
+        for (const row of tail) {
+          const oneLine = row.text.replace(/\s+/g, ' ').trim()
+          lines.push(`${row.role}：${oneLine.length > 140 ? `${oneLine.slice(0, 140)}…` : oneLine}`)
+        }
+        await replyText(binding, lines.join('\n'))
+      } catch (err) {
+        await replyText(binding, `⚠️ 读历史失败：${String(err?.message ?? err)}`)
+      }
+      return true
+    }
+    if (name === 'search' || name === 'find') {
+      const query = String(command.args ?? '').trim()
+      if (!query) {
+        await replyText(binding, '用法：/search 关键词')
+        return true
+      }
+      const controller = ctx.get('sessionController')
+      if (!controller?.search) {
+        await replyText(binding, '⚠️ 这个 DSH 版本不支持搜索。')
+        return true
+      }
+      try {
+        const result = await controller.search({ query }, new AbortController().signal)
+        const items = Array.isArray(result?.items) ? result.items : []
+        if (items.length === 0) {
+          await replyText(binding, `没有找到包含「${query}」的会话。`)
+          return true
+        }
+        const rows = await sortedSessions()
+        const shown = items.slice(0, 8)
+        binding.sessionOptions = shown.map((item) => String(item.sessionId))
+        saveState(true)
+        const lines = [`🔎 「${query}」找到 ${items.length} 个会话（/use 序号 切过去）`]
+        shown.forEach((item, index) => {
+          const row = rows.find((candidate) => candidate.id === String(item.sessionId))
+          const name = row ? `${sessionDisplayName(row)} · ${shortSessionId(row.id)}` : shortSessionId(item.sessionId)
+          const snippet = String(item.snippet ?? '').replace(/\s+/g, ' ').trim()
+          lines.push(`${index + 1}. ${name}`)
+          if (snippet) lines.push(`   ${snippet.length > 120 ? `${snippet.slice(0, 120)}…` : snippet}`)
+        })
+        if (result.hasMore) lines.push('（还有更多结果，换更具体的关键词试试）')
+        await replyText(binding, lines.join('\n'))
+      } catch (err) {
+        await replyText(binding, `⚠️ 搜索失败：${String(err?.message ?? err)}`)
+      }
+      return true
+    }
+    if (name === 'approval' || name === 'policy') {
+      const controller = ctx.get('approval')
+      const session = ctx.get('sessions')?.get?.(binding.sessionId)
+      const agent = ctx.get('agents')?.get?.(binding.sessionId)
+      const value = String(command.args ?? '').trim().toLowerCase()
+      if (!value) {
+        if (!controller?.overrideOf) {
+          await replyText(binding, '⚠️ 这个 DSH 版本不支持查看审批策略。')
+          return true
+        }
+        const current = session ? controller.overrideOf(session) : undefined
+        const lines = ['🔐 审批策略']
+        lines.push(`当前：${current ?? 'ask（默认，需要时询问）'}`)
+        lines.push('', '/approval ask 需要时询问 · /approval never 需要审批的操作直接拒绝')
+        await replyText(binding, lines.join('\n'))
+        return true
+      }
+      if (value !== 'ask' && value !== 'never') {
+        await replyText(binding, '用法：/approval ask 或 /approval never')
+        return true
+      }
+      if (!controller?.setPolicy) {
+        await replyText(binding, '⚠️ 这个 DSH 版本不支持切换审批策略。')
+        return true
+      }
+      if (!agent) {
+        await replyText(binding, '⚠️ 会话没打开，先在电脑端打开它或先发一条消息。')
+        return true
+      }
+      try {
+        controller.setPolicy(agent, value)
+        await replyText(binding, `✅ 审批策略已切到「${value}」（随会话保存，下一轮生效）`)
+        log('info', 'approval policy switched from wechat', {
+          key: binding.key,
+          sessionId: binding.sessionId,
+          policy: value,
+        })
+      } catch (err) {
+        await replyText(binding, `⚠️ 切换审批策略失败：${String(err?.message ?? err)}`)
       }
       return true
     }
