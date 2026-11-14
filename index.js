@@ -32,8 +32,8 @@ const ILINK_APP_ID = 'bot'
 /** 0x000MMNNPP：与官方 2.4.10 对齐 */
 const ILINK_APP_CLIENT_VERSION = (2 << 16) | (4 << 8) | 10
 /** 插件版本：与 package.json 保持一致，出现在 base_info.channel_version 里 */
-const CHANNEL_VERSION = '2.6.0'
-const BOT_AGENT = 'DSH-WeChat/2.6.0'
+const CHANNEL_VERSION = '2.7.0'
+const BOT_AGENT = 'DSH-WeChat/2.7.0'
 /** 媒体 CDN（官方 getUploadUrl 没返回 upload_full_url 时用它拼上传地址） */
 const CDN_BASE = 'https://novac2c.cdn.weixin.qq.com/c2c'
 
@@ -475,6 +475,33 @@ function emotionContextScore(userText, replyText) {
 }
 
 /**
+ * 把一段推理增量压成一句短摘要（本地截取，不调模型、不耗 token）。
+ * @param {string} text 新的思考文本
+ * @param {number} [maxChars] 摘要上限
+ * @returns {string} 摘要（可能为空）
+ */
+function summarizeThinkingDelta(text, maxChars = 120) {
+  const value = String(text ?? '')
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (!value) return ''
+  const limit = Math.max(20, Number(maxChars) || 120)
+  if (value.length <= limit) return value
+  const head = value.slice(0, limit)
+  const boundary = Math.max(
+    head.lastIndexOf('。'),
+    head.lastIndexOf('！'),
+    head.lastIndexOf('？'),
+    head.lastIndexOf('. '),
+    head.lastIndexOf('! '),
+    head.lastIndexOf('? '),
+  )
+  if (boundary >= 20) return head.slice(0, boundary + 1).trim()
+  return `${head.trim()}…`
+}
+
+/**
  * 把用户给的表情名整理成安全文件名主干。
  * @param {string} name 原名
  * @param {string} [fallback] 兜底名
@@ -728,6 +755,16 @@ function normalizeConfig(raw) {
         : 300_000,
     // 是否允许「外来」来源表情包（插件内置等）；默认 false，只发用户自己收录的
     emotionAllowOtherSource: c.emotionAllowOtherSource === true,
+    // 思考片段摘要：边想边给微信发一句本地截取的短摘要（不调模型、不耗 token）
+    thinkingSummary: c.thinkingSummary !== false,
+    thinkingSummaryIntervalMs:
+      Number.isFinite(c.thinkingSummaryIntervalMs) && c.thinkingSummaryIntervalMs >= 10_000
+        ? c.thinkingSummaryIntervalMs
+        : 30_000,
+    thinkingSummaryChars:
+      Number.isFinite(c.thinkingSummaryChars) && c.thinkingSummaryChars >= 40
+        ? Math.min(500, Math.floor(c.thinkingSummaryChars))
+        : 120,
     stateDir,
   }
 }
@@ -2652,6 +2689,66 @@ function createChannel(ctx, config) {
     return saved.length
   }
 
+  // -- 思考片段：边想边给微信发短摘要（本地截取，不耗 token） ----------------
+
+  /** sessionId → { text, sentLength, lastSentAt } */
+  const thinking = new Map()
+
+  function observeAssistantStream(payload) {
+    try {
+      const sessionId = String(payload?.agent?.id ?? '')
+      const frame = payload?.frame
+      if (!sessionId || !frame) return
+      if (frame.type === 'end') {
+        thinking.delete(sessionId)
+        return
+      }
+      if (frame.type !== 'chunk') return
+      const chunk = frame.chunk
+      if (!chunk || chunk.type !== 'reasoning-delta' || typeof chunk.text !== 'string' || !chunk.text) return
+      if (!config.thinkingSummary) return
+      const entry = thinking.get(sessionId) ?? { text: '', sentLength: 0, lastSentAt: 0 }
+      entry.text += chunk.text
+      thinking.set(sessionId, entry)
+      void maybeSendThinking(sessionId).catch((err) =>
+        log('warn', 'thinking summary failed', { sessionId, error: String(err?.message ?? err) }),
+      )
+    } catch (err) {
+      log('warn', 'assistant stream observe failed', { error: String(err?.message ?? err) })
+    }
+  }
+
+  /**
+   * 到点就把新增的思考片段压成一句发给绑定的微信。
+   * @param {string} sessionId 会话 id
+   * @returns {Promise<{ sent: number, reason?: string }>}
+   */
+  async function maybeSendThinking(sessionId) {
+    if (!config.thinkingSummary) return { sent: 0, reason: 'disabled' }
+    const entry = thinking.get(sessionId)
+    if (!entry) return { sent: 0, reason: 'no-session' }
+    const now = Date.now()
+    if (entry.lastSentAt && now - entry.lastSentAt < config.thinkingSummaryIntervalMs) {
+      return { sent: 0, reason: 'throttle' }
+    }
+    const fresh = entry.text.slice(entry.sentLength)
+    const summary = summarizeThinkingDelta(fresh, config.thinkingSummaryChars)
+    if (!summary || summary.length < 8) return { sent: 0, reason: 'too-short' }
+    const targets = optionTargets(sessionId)
+    if (targets.length === 0) return { sent: 0, reason: 'unbound' }
+    let sent = 0
+    for (const binding of targets) {
+      const ok = await sendProgressMessage(binding, `💭 思考中：${summary}`)
+      if (ok) sent += 1
+    }
+    if (sent > 0) {
+      entry.sentLength = entry.text.length
+      entry.lastSentAt = now
+      log('info', 'thinking summary sent', { sessionId, chars: summary.length })
+    }
+    return { sent }
+  }
+
   async function replyText(binding, text) {
     try {
       await sendToBinding(binding, text)
@@ -3349,7 +3446,10 @@ function createChannel(ctx, config) {
       if (!activeTurns.has(sessionId)) activeTurns.set(sessionId, { startedAt: Date.now(), beats: 0 })
       return
     }
-    if (type === 'turn/end') activeTurns.delete(sessionId)
+    if (type === 'turn/end') {
+      activeTurns.delete(sessionId)
+      thinking.delete(sessionId)
+    }
   }
 
   async function sendProgressMessage(binding, text) {
@@ -3937,6 +4037,8 @@ function createChannel(ctx, config) {
     relayApproval,
     handleInbound,
     observeSessionEvent,
+    observeAssistantStream,
+    maybeSendThinking,
     progressTick,
     isSessionBusy,
     usageOf,
@@ -4439,6 +4541,24 @@ export function apply(ctx, rawConfig) {
         { global: true },
       ),
     )
+    // 思考片段：模型边想边把本地截取的短摘要发到微信
+    cleanups.push(
+      ctx.on(
+        'agent/assistant-stream',
+        (payload) => {
+          try {
+            channel.observeAssistantStream(payload)
+          } catch (err) {
+            try {
+              ctx.logger?.warn?.(`[wechat] assistant stream observe failed: ${String(err)}`)
+            } catch {
+              /* ignore */
+            }
+          }
+        },
+        { global: true },
+      ),
+    )
   }
 
   // webServer 可能在插件激活之后才就绪（冷启动顺序不固定），所以轮询等待而不是只试一次。
@@ -4516,6 +4636,7 @@ export const __test = {
   guessEmotionCategory,
   emotionContextScore,
   sanitizeEmotionStem,
+  summarizeThinkingDelta,
   decorateReply,
   listStickers,
   pickSticker,

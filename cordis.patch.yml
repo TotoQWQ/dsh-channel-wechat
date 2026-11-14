@@ -53,6 +53,12 @@
         emotionCooldownMs: 300000
         # 是否允许外来来源表情包（插件内置等）；默认 false，只发用户自己收录的
         emotionAllowOtherSource: false
+        # 思考片段摘要：边想边给微信发一句本地截取的短摘要（不调模型、不耗 token）
+        thinkingSummary: true
+        # 同一会话两条摘要的最小间隔（毫秒）
+        thinkingSummaryIntervalMs: 30000
+        # 单条摘要最多多少字
+        thinkingSummaryChars: 120
         # 跨账号转发：同一会话下，A 号收到的消息也发到 B/C 号的微信
         relayAcrossAccounts: true
         relayPrefix: '[{account}] '

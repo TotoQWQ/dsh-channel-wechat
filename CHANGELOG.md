@@ -6,6 +6,24 @@
 
 ---
 
+## 2.7.0 — 2026-11-14
+
+### 新增
+
+- **思考片段摘要**：监听 `agent/assistant-stream` 的 `reasoning-delta`，把推理增量在本地压成一句「💭 思考中：…」发到绑定的微信。
+  - 纯本地处理（去代码块、合并空白、按句号/上限截断），**不调模型、不耗 token**。
+  - 同一会话默认 30 秒最多一条（`thinkingSummaryIntervalMs`，最短 10 秒）；单条上限 `thinkingSummaryChars`（默认 120 字）。
+  - `turn/end` 或流结束时清空缓冲；`thinkingSummary: false` 可整体关闭；未绑定微信的会话不发。
+  - 只上报「新增」片段，不重复发旧内容。
+- 新自测 `test-thinking.mjs`（7 项：摘要截取/去代码块、首段发送、间隔节流、过间隔再发、turn/end 清空、关闭静默、未绑定不发）。
+
+### 变更
+
+- `apply()` 增加 `agent/assistant-stream` 全局监听（fail-open，异常只记日志）。
+- 版本 2.6.0 → 2.7.0（`CHANNEL_VERSION` / `bot_agent` 同步）。
+
+---
+
 ## 2.6.0 — 2026-11-14
 
 ### 新增

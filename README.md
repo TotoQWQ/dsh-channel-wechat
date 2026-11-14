@@ -30,6 +30,7 @@
 - **微信里整理会话**：`/rename 标题` 给会话改名；`/history 6` 回看最近几条对话；`/search 关键词` 跨会话搜历史，搜到的序号可直接 `/use` 切过去；`/approval ask|never` 看/切当前会话的审批策略。
 - **卖萌**：`/sticker` 从 `~/.dsh/wechat-stickers/` 随机发一张表情包（`/sticker 关键词` 按文件名筛、`/sticker 列表` 看全部）；`cuteLevel` 控制助手回复句尾是否自动带一个 emoji/颜文字（默认 `subtle`，约一半回复带）。
 - **表情包库 `/emotion`**：独立目录 `~/.dsh/wechat-emotions/`，按 9 个分类（开心/难过/生气/惊讶/爱你/无语/摸鱼/加油/其他）存放图片与 GIF，带索引和重命名；`/emotion add [分类]` 开始收录、接着发图、`/emotion end` 结束；`/emotion list / send / rename / delete` 管理；`/emotion other source true|false` 控制是否允许外来来源（默认 false，只用用户自己收录的）。发送前按语境做**本地关键词打分**（用户命中 2 分、助手回复命中 1 分），够分才发、每次最多 2 张、带冷却——全程不耗 token。
+- **思考片段摘要**：模型边想边把推理增量压成一句「💭 思考中：…」发到微信（本地截取、去代码块、按句号/上限截断，**不调模型不耗 token**）；同一会话默认 30 秒最多一条，`turn/end` 清空缓冲，`thinkingSummary: false` 可关。
 - **消息插进正在跑的对话**：会话正在跑时（不管是谁发起的），微信里新来的消息用 `steer` 直接插进**当前这一轮**，在下一个 step 边界被模型看到，不用等这一轮结束；会话空闲时才按普通一轮一答处理。插入会给一次「📥 已插入当前对话」回执（10 秒内多次插入只回一次）。
   - 「在跑」的判断：优先 `sessionController.state` 的真实 `running`，其次 `turn/start`・`turn/end` 跟踪；`turnActive` 只是运行时兜底标记，不写入 `state.json`，重启后按会话真实状态重新判断（避免上次没跑完的轮次被当成一直在跑）。
 - **Agent 工具**：`wechat_login` / `wechat_verify_code` / `wechat_status` / `wechat_bind` / `wechat_unbind` / `wechat_send` / `wechat_send_file` / `wechat_report` / `wechat_logout` / `wechat_simulate` / `wechat_debug`。
@@ -144,6 +145,9 @@ plugin_manager: install_bundle  target=<本目录的绝对路径>
 | `emotionThreshold` | `2` | `subtle` 档的语境分数门槛（用户命中 2 分、助手命中 1 分） |
 | `emotionCooldownMs` | `300000` | 同一聊天自动发表情的冷却 |
 | `emotionAllowOtherSource` | `false` | 是否允许外来来源表情包（内置等）；`/emotion other source true` 可临时开 |
+| `thinkingSummary` | `true` | 思考时把推理增量压成短摘要发微信（本地截取，不耗 token） |
+| `thinkingSummaryIntervalMs` | `30000` | 同一会话两条摘要的最小间隔，最短 10000 |
+| `thinkingSummaryChars` | `120` | 单条摘要最多多少字 |
 | `apiBase` | `https://ilinkai.weixin.qq.com` | iLink 服务地址 |
 
 选项/审批的回复规则：
