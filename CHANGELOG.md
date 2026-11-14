@@ -6,6 +6,23 @@
 
 ---
 
+## 2.4.7 — 2026-11-14
+
+### 新增
+
+- **`/models` / `/model`**：列可用模型（按厂商分组编号，标出「当前 / 默认」与推理档，最多 20 个），并按序号记住到绑定的 `modelOptions`；`/model` 看当前与默认；`/model 2` 切到第 2 个；`/model 2 high` 同时指定推理档；也支持 `/model <provider>/<modelId>`。切换走 `sessionController.selectModel`（会话级、显式恢复），回执「下一轮生效」。
+- **`/status`**：一次看齐标题/id、在线与运行中、当前模型、队列条数与待输入（approval / question）、工作目录、绑定方式。
+- **`/stop`**：仅在会话有轮次在跑时调用 `sessionController.cancel`，回执提示排队消息仍在；空闲时明确回「没有在跑的轮次」。
+- `/help` 文本同步补充四个新命令。
+- 新自测 `test-models.mjs`（8 项：列目录与标记、看当前、按序号/推理档/完整 id 切换、越界与用法提示、`/status` 内容、`/stop` 忙闲两种行为）。
+
+### 变更
+
+- 命令白名单扩到 `models / model / status / stop`；未知 `/xxx` 行为不变（照常转发）。
+- 版本 2.4.6 → 2.4.7（`CHANNEL_VERSION` / `bot_agent` 同步）。
+
+---
+
 ## 2.4.6 — 2026-11-14
 
 ### 新增

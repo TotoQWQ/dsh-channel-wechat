@@ -32,8 +32,8 @@ const ILINK_APP_ID = 'bot'
 /** 0x000MMNNPP：与官方 2.4.10 对齐 */
 const ILINK_APP_CLIENT_VERSION = (2 << 16) | (4 << 8) | 10
 /** 插件版本：与 package.json 保持一致，出现在 base_info.channel_version 里 */
-const CHANNEL_VERSION = '2.4.6'
-const BOT_AGENT = 'DSH-WeChat/2.4.6'
+const CHANNEL_VERSION = '2.4.7'
+const BOT_AGENT = 'DSH-WeChat/2.4.7'
 /** 媒体 CDN（官方 getUploadUrl 没返回 upload_full_url 时用它拼上传地址） */
 const CDN_BASE = 'https://novac2c.cdn.weixin.qq.com/c2c'
 
@@ -424,7 +424,22 @@ function formatDuration(ms) {
 }
 
 /** 微信里认的会话命令；不在这张表里的 `/xxx` 不拦截，照常发给会话。 */
-const WECHAT_COMMANDS = new Set(['sessions', 'ls', 'list', 'use', 'switch', 'new', 'current', 'now', 'help', '?'])
+const WECHAT_COMMANDS = new Set([
+  'sessions',
+  'ls',
+  'list',
+  'use',
+  'switch',
+  'new',
+  'current',
+  'now',
+  'models',
+  'model',
+  'status',
+  'stop',
+  'help',
+  '?',
+])
 
 /** `/help` 的说明文本。 */
 const WECHAT_HELP_TEXT = [
@@ -433,6 +448,10 @@ const WECHAT_HELP_TEXT = [
   '/use 2     切到第 2 个会话',
   '/new       换到新会话',
   '/current   查看当前会话',
+  '/models    列出可用模型',
+  '/model 2   切换模型（可带推理档：/model 2 high）',
+  '/status    会话状态（模型 / 运行 / 队列）',
+  '/stop      停止当前这一轮',
   '/help      这条帮助',
   '',
   '其他消息照常发给当前会话。',
@@ -2085,6 +2104,49 @@ function createChannel(ctx, config) {
     return rows.sort((a, b) => Number(b.updatedAt ?? 0) - Number(a.updatedAt ?? 0))
   }
 
+  /** 读取模型目录；老版本 DSH 拿不到时返回 null。 */
+  async function modelCatalogOf() {
+    const controller = ctx.get('sessionController')
+    if (!controller?.modelCatalog) return null
+    try {
+      return await controller.modelCatalog()
+    } catch (err) {
+      log('warn', 'model catalog failed', { error: String(err?.message ?? err) })
+      return null
+    }
+  }
+
+  /** 会话当前模型：优先 requestContext，其次 requestHeader。 */
+  function currentModelOf(sessionId) {
+    const session = ctx.get('sessions')?.get?.(sessionId)
+    if (!session) return null
+    try {
+      const context = session.requestContext?.()
+      if (context?.provider && context?.model) return { provider: context.provider, model: context.model }
+    } catch {
+      /* ignore */
+    }
+    try {
+      const header = session.requestHeader?.()
+      const config = header?.config
+      if (config?.provider && config?.model) return { provider: config.provider, model: config.model }
+    } catch {
+      /* ignore */
+    }
+    return null
+  }
+
+  /** 模型目录拍平成 [{ provider, providerName, model }]。 */
+  function flattenModelCatalog(catalog) {
+    const flat = []
+    for (const group of Array.isArray(catalog?.groups) ? catalog.groups : []) {
+      for (const model of Array.isArray(group?.models) ? group.models : []) {
+        flat.push({ provider: String(group.id), providerName: String(group.name ?? group.id), model })
+      }
+    }
+    return flat
+  }
+
   /**
    * 处理一条微信会话命令。
    * @returns {Promise<boolean>} true 表示已作为命令处理（不再转发给会话）
@@ -2106,6 +2168,142 @@ function createChannel(ctx, config) {
       )
       lines.push(`绑定：${binding.explicit ? '手动绑定' : '自动会话'}`)
       await replyText(binding, lines.join('\n'))
+      return true
+    }
+    if (name === 'models') {
+      const catalog = await modelCatalogOf()
+      const flat = flattenModelCatalog(catalog)
+      if (flat.length === 0) {
+        await replyText(binding, '（这个 DSH 版本拿不到模型目录）')
+        return true
+      }
+      binding.modelOptions = flat.map((item) => ({ provider: item.provider, model: String(item.model.id) }))
+      saveState(true)
+      const current = currentModelOf(binding.sessionId)
+      const fallback = catalog?.default
+      const lines = ['🧠 可用模型（回 /model 序号 切换）']
+      const limit = Math.min(flat.length, 20)
+      for (let index = 0; index < limit; index += 1) {
+        const item = flat[index]
+        const marks = []
+        if (current && current.provider === item.provider && current.model === String(item.model.id)) marks.push('当前')
+        if (fallback && fallback.provider === item.provider && fallback.model === String(item.model.id)) marks.push('默认')
+        const efforts =
+          Array.isArray(item.model.reasoning?.efforts) && item.model.reasoning.efforts.length > 0
+            ? `，推理档 ${item.model.reasoning.efforts.map((effort) => effort.id).join('/')}`
+            : ''
+        lines.push(
+          `${index + 1}. ${item.providerName} / ${item.model.name}（${item.model.id}${efforts}）` +
+            `${marks.length ? ` ← ${marks.join(' · ')}` : ''}`,
+        )
+      }
+      if (flat.length > limit) lines.push(`（共 ${flat.length} 个，只列前 ${limit}）`)
+      lines.push('', '例如：/model 2   或   /model 2 high')
+      await replyText(binding, lines.join('\n'))
+      return true
+    }
+    if (name === 'model') {
+      const args = command.args
+      const controller = ctx.get('sessionController')
+      if (!args) {
+        const catalog = await modelCatalogOf()
+        const current = currentModelOf(binding.sessionId)
+        const lines = ['🧠 模型']
+        lines.push(current ? `当前：${current.provider} / ${current.model}` : '当前：会话还没打开，读不到（打开后再 /model）')
+        if (catalog?.default) lines.push(`默认：${catalog.default.provider} / ${catalog.default.model}`)
+        lines.push('', '发 /models 看清单，/model 序号 切换。')
+        await replyText(binding, lines.join('\n'))
+        return true
+      }
+      let selection = null
+      const numbered = /^(\d+)(?:\s+([\w.-]+))?$/.exec(args)
+      if (numbered) {
+        const options = Array.isArray(binding.modelOptions) ? binding.modelOptions : []
+        const entry = options[Number(numbered[1]) - 1]
+        if (!entry) {
+          await replyText(binding, `序号 ${numbered[1]} 不在上次列表里，先发 /models 重新取列表。`)
+          return true
+        }
+        selection = { provider: entry.provider, model: entry.model }
+        if (numbered[2]) selection.reasoningEffort = numbered[2]
+      } else if (/^[\w.-]+\s*\/\s*[\w.:-]+$/.test(args)) {
+        const [provider, model] = args.split('/').map((part) => part.trim())
+        selection = { provider, model }
+      } else {
+        await replyText(binding, '用法：/model（看当前）· /model 2（切换）· /model 2 high（带推理档）· /model provider/modelId')
+        return true
+      }
+      if (!controller?.selectModel) {
+        await replyText(binding, '⚠️ 这个 DSH 版本不支持切换模型。')
+        return true
+      }
+      try {
+        await ensureSession(binding.sessionId)
+        const result = await controller.selectModel({ sessionId: binding.sessionId, ...selection })
+        const selected = result?.selected ?? selection
+        const effort = selected.reasoningEffort ? `（推理档 ${selected.reasoningEffort}）` : ''
+        await replyText(binding, `✅ 已切换模型：${selected.provider} / ${selected.model}${effort}\n下一轮生效。`)
+        log('info', 'model switched from wechat', {
+          key: binding.key,
+          sessionId: binding.sessionId,
+          provider: selected.provider,
+          model: selected.model,
+          reasoningEffort: selected.reasoningEffort ?? null,
+        })
+      } catch (err) {
+        await replyText(binding, `⚠️ 切换模型失败：${String(err?.message ?? err)}`)
+      }
+      return true
+    }
+    if (name === 'status') {
+      const controller = ctx.get('sessionController')
+      const rows = await sortedSessions()
+      const row = rows.find((item) => item.id === binding.sessionId)
+      const session = ctx.get('sessions')?.get?.(binding.sessionId)
+      let state = null
+      if (controller?.state) {
+        try {
+          state = await controller.state({ sessionId: binding.sessionId }, new AbortController().signal)
+        } catch (err) {
+          log('warn', 'session state failed', { error: String(err?.message ?? err) })
+        }
+      }
+      const current = currentModelOf(binding.sessionId)
+      const pending = Array.isArray(state?.pendingInput) ? state.pendingInput : []
+      const lines = ['📊 会话状态']
+      lines.push(row ? `${sessionDisplayName(row)} · ${shortSessionId(row.id)}` : `${binding.sessionId}（不在会话列表里）`)
+      lines.push(
+        `在线：${session ? '是' : '否'} · 运行中：${state ? (state.running ? '是' : '否') : isSessionBusy(binding.sessionId) ? '是' : '否'}`,
+      )
+      lines.push(current ? `模型：${current.provider} / ${current.model}` : '模型：读不到（会话未打开）')
+      if (state) {
+        lines.push(
+          `队列：${Array.isArray(state.queue) ? state.queue.length : 0} 条${pending.length ? ` · 待输入：${pending.join(' / ')}` : ''}`,
+        )
+      }
+      const cwd = row?.cwd ?? session?.header?.cwd
+      if (cwd) lines.push(`目录：${cwd}`)
+      lines.push(`绑定：${binding.explicit ? '手动绑定' : '自动会话'}`)
+      await replyText(binding, lines.join('\n'))
+      return true
+    }
+    if (name === 'stop') {
+      const controller = ctx.get('sessionController')
+      if (!controller?.cancel) {
+        await replyText(binding, '⚠️ 这个 DSH 版本不支持停止。')
+        return true
+      }
+      if (!isSessionBusy(binding.sessionId)) {
+        await replyText(binding, '没有在跑的轮次，不用停。')
+        return true
+      }
+      try {
+        controller.cancel({ sessionId: binding.sessionId })
+        await replyText(binding, '🛑 已请求停止当前这一轮；排队的消息还在，需要的话发 /new 或继续发消息。')
+        log('info', 'cancel requested from wechat', { key: binding.key, sessionId: binding.sessionId })
+      } catch (err) {
+        await replyText(binding, `⚠️ 停止失败：${String(err?.message ?? err)}`)
+      }
       return true
     }
     if (name === 'sessions' || name === 'ls' || name === 'list') {
