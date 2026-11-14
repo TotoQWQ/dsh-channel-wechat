@@ -32,8 +32,8 @@ const ILINK_APP_ID = 'bot'
 /** 0x000MMNNPP：与官方 2.4.10 对齐 */
 const ILINK_APP_CLIENT_VERSION = (2 << 16) | (4 << 8) | 10
 /** 插件版本：与 package.json 保持一致，出现在 base_info.channel_version 里 */
-const CHANNEL_VERSION = '2.11.0'
-const BOT_AGENT = 'DSH-WeChat/2.11.0'
+const CHANNEL_VERSION = '2.11.1'
+const BOT_AGENT = 'DSH-WeChat/2.11.1'
 /** 媒体 CDN（官方 getUploadUrl 没返回 upload_full_url 时用它拼上传地址） */
 const CDN_BASE = 'https://novac2c.cdn.weixin.qq.com/c2c'
 
@@ -1847,11 +1847,6 @@ function createChannel(ctx, config) {
   }
 
   // -- 发送 ----------------------------------------------------------------
-
-  function splitText(text, limit) {
-    return splitByLength(text, limit)
-  }
-
   // -- 发送熔断：连续失败时暂缓，避免 token 失效时把平台风控越撞越狠 --------
 
   const sendHealth = new Map()
@@ -2955,7 +2950,7 @@ function createChannel(ctx, config) {
    */
   function feedStreamText(sessionId, delta) {
     if (!config.streamSegment) return []
-    const entry = streamBuffers.get(sessionId) ?? { text: '', sentText: '', lastSentAt: 0 }
+    const entry = streamBuffers.get(sessionId) ?? { text: '', sentRaw: '', lastSentAt: 0 }
     entry.text += String(delta ?? '')
     streamBuffers.set(sessionId, entry)
     const segments = []
@@ -2966,7 +2961,8 @@ function createChannel(ctx, config) {
       if (candidate.length < config.streamMinChars) break
       if (entry.lastSentAt && Date.now() - entry.lastSentAt < config.streamMinIntervalMs) break
       segments.push(candidate)
-      entry.sentText += (entry.sentText ? '\n\n' : '') + candidate
+      // 记录原始前缀（含段落结尾的换行），最终回复按原始字符扣减，避免空白差异导致重复
+      entry.sentRaw += entry.text.slice(0, boundary + 2)
       entry.text = entry.text.slice(boundary + 2)
       entry.lastSentAt = Date.now()
     }
@@ -2983,8 +2979,10 @@ function createChannel(ctx, config) {
     const entry = streamBuffers.get(sessionId)
     streamBuffers.delete(sessionId)
     const value = String(reply ?? '')
-    if (!entry?.sentText) return value
-    if (value.startsWith(entry.sentText)) return value.slice(entry.sentText.length).trimStart()
+    if (!entry?.sentRaw) return value
+    if (value.startsWith(entry.sentRaw)) return value.slice(entry.sentRaw.length).trimStart()
+    const trimmed = entry.sentRaw.trimEnd()
+    if (trimmed && value.startsWith(trimmed)) return value.slice(trimmed.length).trimStart()
     return value
   }
 
@@ -2997,19 +2995,13 @@ function createChannel(ctx, config) {
     for (const binding of targets) {
       for (const segment of segments) {
         try {
-          const formatted = formatWechatText(segment, { maxLine: config.formatMaxLine })
-          const chunks = segmentText(formatted, {
-            maxChars: config.segmentMaxChars || config.maxReplyChars,
-            mode: config.segmentMode,
+          // 交给 sendToChat：内部会排版、按 segmentMaxChars 切分并加发送间隔
+          await sendToChat({
+            accountId: binding.accountId,
+            toUserId: binding.toUserId || String(binding.chatId).replace(/^user:/, ''),
+            contextToken: binding.contextToken,
+            text: segment,
           })
-          for (const chunk of chunks) {
-            await sendToChat({
-              accountId: binding.accountId,
-              toUserId: binding.toUserId || String(binding.chatId).replace(/^user:/, ''),
-              contextToken: binding.contextToken,
-              text: chunk,
-            })
-          }
           binding.lastOutboundAt = Date.now()
           sent += 1
         } catch (err) {
@@ -3842,7 +3834,9 @@ function createChannel(ctx, config) {
     if (type === 'turn/end') {
       activeTurns.delete(sessionId)
       thinking.delete(sessionId)
-      streamBuffers.delete(sessionId)
+      // 微信这一轮还在等 waitForReply 收尾：缓冲留给 runTurn 去扣剩余，不能在这里清掉，
+      // 否则最终回复会把已经流式发过的段落再发一遍。
+      if (!wechatTurns.has(sessionId)) streamBuffers.delete(sessionId)
     }
   }
 

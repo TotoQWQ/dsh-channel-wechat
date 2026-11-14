@@ -109,8 +109,12 @@ check('POST /new-session 建会话', created.status === 200 && Boolean(created.j
 if (binding) {
   const target = binding.sessionId
   check('POST /bind 幂等', (await post('/bind', { key: binding.key, sessionId: target })).json?.ok === true)
-  check('POST /unbind', (await post('/unbind', { key: binding.key })).json?.ok === true)
-  check('POST /bind 恢复原会话', (await post('/bind', { key: binding.key, sessionId: target })).json?.binding?.sessionId === target)
+  try {
+    check('POST /unbind', (await post('/unbind', { key: binding.key })).json?.ok === true)
+  } finally {
+    // 解绑后无论后续检查是否失败，都恢复原会话，避免测试把线上绑定留在自动会话
+    check('POST /bind 恢复原会话', (await post('/bind', { key: binding.key, sessionId: target })).json?.binding?.sessionId === target)
+  }
 }
 
 // 9. 其它

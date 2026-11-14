@@ -116,6 +116,25 @@ try {
     assert.equal(remainder, '丙'.repeat(20))
   })
 
+  await check('turn/end 先到也不影响剩余计算（不会整条重发）', async () => {
+    channel.beginWechatTurn(sessionId)
+    delta(`${'庚'.repeat(60)}\n\n`)
+    await waitFor(() => sent.some((item) => item.startsWith('庚')))
+    channel.observeSessionEvent(liveSession, { type: 'turn/end' })
+    const full = `${'庚'.repeat(60)}\n\n尾巴部分`
+    const remainder = channel.takeStreamRemainder(sessionId, full)
+    assert.equal(remainder, '尾巴部分')
+  })
+
+  await check('前缀后有额外空白时仍能正确扣减', async () => {
+    channel.beginWechatTurn(sessionId)
+    delta(`${'辛'.repeat(60)}\n\n`)
+    await waitFor(() => sent.some((item) => item.startsWith('辛')))
+    const full = `${'辛'.repeat(60)}\n\n  尾巴`
+    const remainder = channel.takeStreamRemainder(sessionId, full)
+    assert.equal(remainder, '尾巴')
+  })
+
   await check('非微信发起的轮次不流式发', async () => {
     sent.length = 0
     channel.endWechatTurn(sessionId)
