@@ -6,6 +6,24 @@
 
 ---
 
+## 2.6.0 — 2026-11-14
+
+### 新增
+
+- **表情包库 `/emotion`**：独立目录（默认 `~/.dsh/wechat-emotions/`）按 9 个分类存放图片/GIF（开心 / 难过 / 生气 / 惊讶 / 爱你 / 无语 / 摸鱼 / 加油 / 其他），启动时自动建目录、把手工丢进分类目录的图片补进索引，并生成 `index.json`。
+  - `/emotion add [分类]` → 接着发图片/GIF → `/emotion end` 结束收录（`/emotion cancel` 取消）；收到的图会解密落盘、按分类归档并登记，不转发给会话。
+  - `/emotion list [分类]` 查看（不填分类看各分类数量）；`/emotion send [分类|名字]` 手动发 1–2 张；`/emotion rename 旧名 新名`；`/emotion delete 名字`。
+  - `/emotion other source true|false`：是否允许「外来」来源表情包，**默认 false**（只发用户自己收录的；插件内置来源不参与自动发送与列表）。
+  - **语境自动发送**：本地关键词打分（用户命中 2 分、助手回复命中 1 分），`emotionAuto: subtle`（默认）达到 `emotionThreshold`（默认 2）才发，`always` 命中就发，`off` 关闭；每次最多 2 张，同一聊天有 `emotionCooldownMs`（默认 5 分钟）冷却；纯本地判断，不耗 token。
+  - snapshot 增加 `emotions: { total, counts, allowOther }`。
+- 新自测 `test-emotion.mjs`（9 项：分类/打分、落盘与重名、add→end、list、rename/delete、外来开关、手动发送、自动发送与冷却、off 档）。
+
+### 变更
+
+- 版本 2.5.0 → 2.6.0（`CHANNEL_VERSION` / `bot_agent` 同步）。
+
+---
+
 ## 2.5.0 — 2026-11-14
 
 ### 新增

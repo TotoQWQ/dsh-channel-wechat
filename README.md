@@ -29,6 +29,7 @@
 - **微信里换模型 / 看状态 / 停任务**：`/models` 列可用模型（标当前/默认、推理档），`/model 2`（或 `/model 2 high`、`/model provider/modelId`）切换会话模型；`/status` 看运行状态、队列与待输入；`/stop` 停掉当前这一轮。
 - **微信里整理会话**：`/rename 标题` 给会话改名；`/history 6` 回看最近几条对话；`/search 关键词` 跨会话搜历史，搜到的序号可直接 `/use` 切过去；`/approval ask|never` 看/切当前会话的审批策略。
 - **卖萌**：`/sticker` 从 `~/.dsh/wechat-stickers/` 随机发一张表情包（`/sticker 关键词` 按文件名筛、`/sticker 列表` 看全部）；`cuteLevel` 控制助手回复句尾是否自动带一个 emoji/颜文字（默认 `subtle`，约一半回复带）。
+- **表情包库 `/emotion`**：独立目录 `~/.dsh/wechat-emotions/`，按 9 个分类（开心/难过/生气/惊讶/爱你/无语/摸鱼/加油/其他）存放图片与 GIF，带索引和重命名；`/emotion add [分类]` 开始收录、接着发图、`/emotion end` 结束；`/emotion list / send / rename / delete` 管理；`/emotion other source true|false` 控制是否允许外来来源（默认 false，只用用户自己收录的）。发送前按语境做**本地关键词打分**（用户命中 2 分、助手回复命中 1 分），够分才发、每次最多 2 张、带冷却——全程不耗 token。
 - **消息插进正在跑的对话**：会话正在跑时（不管是谁发起的），微信里新来的消息用 `steer` 直接插进**当前这一轮**，在下一个 step 边界被模型看到，不用等这一轮结束；会话空闲时才按普通一轮一答处理。插入会给一次「📥 已插入当前对话」回执（10 秒内多次插入只回一次）。
   - 「在跑」的判断：优先 `sessionController.state` 的真实 `running`，其次 `turn/start`・`turn/end` 跟踪；`turnActive` 只是运行时兜底标记，不写入 `state.json`，重启后按会话真实状态重新判断（避免上次没跑完的轮次被当成一直在跑）。
 - **Agent 工具**：`wechat_login` / `wechat_verify_code` / `wechat_status` / `wechat_bind` / `wechat_unbind` / `wechat_send` / `wechat_send_file` / `wechat_report` / `wechat_logout` / `wechat_simulate` / `wechat_debug`。
@@ -98,6 +99,7 @@ plugin_manager: install_bundle  target=<本目录的绝对路径>
 | `/search 关键词`（`/find`） | 跨会话搜历史，列出命中的会话与片段，序号可直接 `/use` 切过去 |
 | `/approval`（`/policy`） | 看当前审批策略；`/approval ask` 需要时询问，`/approval never` 需要审批的操作直接拒绝 |
 | `/sticker` | 从表情包目录随机发一张图片/GIF；`/sticker 关键词` 按文件名筛；`/sticker 列表` 看目录内容 |
+| `/emotion` | 表情包库：`add [分类]` / `end` / `cancel` / `list [分类]` / `send [分类\|名字]` / `rename 旧 新` / `delete 名字` / `other source true\|false` |
 | `/models` | 列出可用模型（按厂商分组编号，标出「当前 / 默认」和推理档），并记住这次的序号 |
 | `/model` | 查看当前会话模型与默认模型 |
 | `/model 2` | 切到上次 `/models` 列表的第 2 个模型；`/model 2 high` 同时指定推理档；也可 `/model <provider>/<modelId>` |
@@ -137,6 +139,11 @@ plugin_manager: install_bundle  target=<本目录的绝对路径>
 | `stickerDir` | `''` | 表情包目录，空 = `~/.dsh/wechat-stickers` |
 | `cuteLevel` | `subtle` | 回复句尾加 emoji 的强度：`off` / `subtle`（约一半）/ `always` |
 | `cutePool` | 内置 10 个 | 可爱化回复用的 emoji / 颜文字池 |
+| `emotionDir` | `''` | 表情包库目录，空 = `~/.dsh/wechat-emotions`（启动时建 9 个分类目录） |
+| `emotionAuto` | `subtle` | 自动表情：`off` / `subtle`（语境够强）/ `always`（命中就发） |
+| `emotionThreshold` | `2` | `subtle` 档的语境分数门槛（用户命中 2 分、助手命中 1 分） |
+| `emotionCooldownMs` | `300000` | 同一聊天自动发表情的冷却 |
+| `emotionAllowOtherSource` | `false` | 是否允许外来来源表情包（内置等）；`/emotion other source true` 可临时开 |
 | `apiBase` | `https://ilinkai.weixin.qq.com` | iLink 服务地址 |
 
 选项/审批的回复规则：

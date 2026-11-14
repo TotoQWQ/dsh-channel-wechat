@@ -43,6 +43,16 @@
         cuteLevel: subtle
         # 可爱化回复用的 emoji / 颜文字池
         cutePool: ['🌊', '🐳', '✨', '😊', '🫧', '🎵', '🌸', '🐱', '🫶', '☕']
+        # 表情包库（/emotion）：9 个分类目录 + index.json（留空 = ~/.dsh/wechat-emotions）
+        emotionDir: ''
+        # 自动表情：off 不发 / subtle 语境够强才发 / always 命中就发
+        emotionAuto: subtle
+        # subtle 档需要的语境分数（用户命中 2 分、助手命中 1 分）
+        emotionThreshold: 2
+        # 同一聊天自动发表情的冷却（毫秒）
+        emotionCooldownMs: 300000
+        # 是否允许外来来源表情包（插件内置等）；默认 false，只发用户自己收录的
+        emotionAllowOtherSource: false
         # 跨账号转发：同一会话下，A 号收到的消息也发到 B/C 号的微信
         relayAcrossAccounts: true
         relayPrefix: '[{account}] '
