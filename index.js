@@ -37,8 +37,8 @@ const ILINK_APP_ID = 'bot'
 /** 0x000MMNNPP：与官方 2.4.10 对齐 */
 const ILINK_APP_CLIENT_VERSION = (2 << 16) | (4 << 8) | 10
 /** 插件版本：与 package.json 保持一致，出现在 base_info.channel_version 里 */
-const CHANNEL_VERSION = '2.20.0'
-const BOT_AGENT = 'DSH-WeChat/2.20.0'
+const CHANNEL_VERSION = '2.20.1'
+const BOT_AGENT = 'DSH-WeChat/2.20.1'
 /** 媒体 CDN（官方 getUploadUrl 没返回 upload_full_url 时用它拼上传地址） */
 const CDN_BASE = 'https://novac2c.cdn.weixin.qq.com/c2c'
 
@@ -3103,7 +3103,15 @@ function createChannel(ctx, config) {
     const llm = ctx.get('llm')
     const attachments = ctx.get('attachments')
     const selection = ctx.get('agentDefaultModel')?.currentSelection?.()
-    if (!llm?.stream || !attachments?.saveImage || !selection?.provider || !selection?.model) return null
+    if (!llm?.stream || !attachments?.saveImage || !selection?.provider || !selection?.model) {
+      log('warn', 'emotion classify unavailable', {
+        hasLlm: Boolean(llm?.stream),
+        hasAttachments: Boolean(attachments?.saveImage),
+        provider: selection?.provider ?? null,
+        model: selection?.model ?? null,
+      })
+      return null
+    }
     const suffix = String(ext || '.png').toLowerCase()
     const mediaType =
       suffix === '.jpg' || suffix === '.jpeg'
@@ -3147,7 +3155,8 @@ function createChannel(ctx, config) {
       }
       const answer = text.join('').trim()
       const matched = EMOTION_CATEGORIES.find((category) => answer.includes(category))
-      if (matched) log('info', 'emotion classified', { category: matched })
+      if (matched) log('info', 'emotion classified', { category: matched, provider: selection.provider, model: selection.model })
+      else log('warn', 'emotion classify no-match', { answer: answer.slice(0, 200) })
       return matched ?? null
     } catch (err) {
       log('warn', 'emotion classify failed', { error: String(err?.message ?? err) })
@@ -5376,6 +5385,18 @@ function createChannel(ctx, config) {
       }
       if (method === 'POST' && route === 'reload') {
         return json(res, await hotReloadPlugin('http'))
+      }
+      if (method === 'GET' && route === 'classify') {
+        const filePath = url.searchParams.get('path') || ''
+        if (!filePath) return json(res, { error: '缺 path 参数' }, 400)
+        let buffer
+        try {
+          buffer = fs.readFileSync(filePath)
+        } catch (err) {
+          return json(res, { error: String(err?.message ?? err) }, 400)
+        }
+        const category = await classifyEmotionBuffer(buffer, path.extname(filePath) || '.png')
+        return json(res, { ok: true, filePath, category })
       }
       if (method === 'GET' && route === 'mirror-probe') {
         const fromParam = Number(url.searchParams.get('from') ?? NaN)

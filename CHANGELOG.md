@@ -6,6 +6,21 @@
 
 ---
 
+## 2.20.1 — 2026-11-15
+
+### 修复/诊断
+
+- 2.20.0 的表情识别在模型不可用/不匹配时静默返回 null，无法排查；现在会记录：
+  - `emotion classify unavailable`（缺 llm / attachments / 模型选择）；
+  - `emotion classify no-match`（模型回复但没有匹配到分类，带回复前 200 字）。
+- 新增 `GET /wechat-channel/classify?path=<图片绝对路径>`：直接调 `classifyEmotionBuffer` 返回识别分类，便于不经过微信验证。
+
+### 变更
+
+- 版本 2.20.0 → 2.20.1（`CHANNEL_VERSION` / `bot_agent` 同步）。
+
+---
+
 ## 2.20.0 — 2026-11-15
 
 ### 新增
