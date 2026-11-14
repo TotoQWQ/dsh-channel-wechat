@@ -37,8 +37,8 @@ const ILINK_APP_ID = 'bot'
 /** 0x000MMNNPP：与官方 2.4.10 对齐 */
 const ILINK_APP_CLIENT_VERSION = (2 << 16) | (4 << 8) | 10
 /** 插件版本：与 package.json 保持一致，出现在 base_info.channel_version 里 */
-const CHANNEL_VERSION = '2.16.0'
-const BOT_AGENT = 'DSH-WeChat/2.16.0'
+const CHANNEL_VERSION = '2.17.0'
+const BOT_AGENT = 'DSH-WeChat/2.17.0'
 /** 媒体 CDN（官方 getUploadUrl 没返回 upload_full_url 时用它拼上传地址） */
 const CDN_BASE = 'https://novac2c.cdn.weixin.qq.com/c2c'
 
@@ -551,7 +551,6 @@ const WECHAT_COMMANDS = new Set([
   'tasks',
   'schedule',
   'reload',
-  'voice',
   'help',
   '?',
 ])
@@ -578,7 +577,6 @@ const WECHAT_HELP_TEXT = [
   '/risk      风险消息邮件预警状态（/risk test 发测试邮件）',
   '/tasks     查看定时任务（/tasks 别名 /schedule）',
   '/reload    热重载插件（应用新文件，不用重启 DSH）',
-  '/voice     查看语音转写与兜底状态',
   '/stop      停止当前这一轮',
   '/help      这条帮助',
   '',
@@ -916,9 +914,6 @@ function smtpSendMail(options) {
   })
 }
 
-/**
- * 是否为「投递失败」之外的噪声提示（旧版失败通知）。
-
 /** 旧版本会把自己生成的「处理失败」提示也塞进补发队列，恢复时要跳过这些噪声。 */
 function isNoisePending(text) {
   return /^⚠️ DSH 处理失败/.test(String(text ?? ''))
@@ -1093,8 +1088,8 @@ function normalizeConfig(raw) {
         : 300_000,
     // 是否允许「外来」来源表情包（插件内置等）；默认 false，只发用户自己收录的
     emotionAllowOtherSource: c.emotionAllowOtherSource === true,
-    // 思考片段摘要：边想边给微信发一句本地截取的短摘要（不调模型、不耗 token）
-    thinkingSummary: c.thinkingSummary !== false,
+    // 思考片段摘要：边想边给微信发一句本地截取的短摘要（不调模型、不耗 token）；默认关，按需开启
+    thinkingSummary: c.thinkingSummary === true,
     thinkingSummaryIntervalMs:
       Number.isFinite(c.thinkingSummaryIntervalMs) && c.thinkingSummaryIntervalMs >= 10_000
         ? c.thinkingSummaryIntervalMs
@@ -1133,8 +1128,8 @@ function normalizeConfig(raw) {
       Number.isFinite(c.sendBreakerMs) && c.sendBreakerMs >= 60_000
         ? Math.min(3600_000, c.sendBreakerMs)
         : 300_000,
-    // 流式分段：模型边生成边把「完整段落」发到微信，不用等整条回复结束
-    streamSegment: c.streamSegment !== false,
+    // 流式分段：模型边生成边把「完整段落」发到微信（默认关，回到整条完成后分段发）
+    streamSegment: c.streamSegment === true,
     // 一个完整段落至少多少字才发（太短会刷屏）
     streamMinChars:
       Number.isFinite(c.streamMinChars) && c.streamMinChars >= 50
@@ -1201,9 +1196,6 @@ function normalizeConfig(raw) {
     hotReload: c.hotReload !== false,
     // 文件变更后自动热重载（默认关，避免编辑到一半就重载）
     autoHotReload: c.autoHotReload === true,
-    // 语音兜底：腾讯转写为空时，尝试 DSH speechToText（仅非 silk 音频）并给对方提示
-    voiceAsr: c.voiceAsr !== false,
-    voiceFallbackHint: c.voiceFallbackHint !== false,
     stateDir,
   }
 }
@@ -1255,6 +1247,68 @@ function createChannel(ctx, config) {
 
   // 构造时先读一次状态：工具与测试可以直接使用绑定表；start() 会再读一次（幂等）
   loadState()
+  applyFeatureOverrides()
+
+  // -- 功能开关：面板 / HTTP 可切换，覆盖值存在 state.settings.features ------
+
+  const FEATURE_LABELS = {
+    thinkingSummary: '思考片段摘要',
+    streamSegment: '流式分段',
+    automationReport: '定时任务完成通知',
+    progressHeartbeat: '进度心跳',
+    riskAlert: '风险消息邮件',
+    emotionAuto: '自动表情',
+    autoHotReload: '自动热重载',
+  }
+
+  function featureValues() {
+    return {
+      thinkingSummary: config.thinkingSummary === true,
+      streamSegment: config.streamSegment === true,
+      automationReport: config.automationReport === true,
+      progressHeartbeat: config.progressHeartbeat === true,
+      riskAlert: config.riskAlert === true,
+      emotionAuto: config.emotionAuto !== 'off',
+      autoHotReload: config.autoHotReload === true,
+    }
+  }
+
+  /** 把 state 里的开关覆盖应用到运行时 config（重启后保持用户选择）。 */
+  function applyFeatureOverrides() {
+    const overrides = state.settings?.features
+    if (!overrides || typeof overrides !== 'object') return
+    if (typeof overrides.thinkingSummary === 'boolean') config.thinkingSummary = overrides.thinkingSummary
+    if (typeof overrides.streamSegment === 'boolean') config.streamSegment = overrides.streamSegment
+    if (typeof overrides.automationReport === 'boolean') config.automationReport = overrides.automationReport
+    if (typeof overrides.progressHeartbeat === 'boolean') config.progressHeartbeat = overrides.progressHeartbeat
+    if (typeof overrides.riskAlert === 'boolean') config.riskAlert = overrides.riskAlert
+    if (typeof overrides.emotionAuto === 'boolean') config.emotionAuto = overrides.emotionAuto ? 'subtle' : 'off'
+    if (typeof overrides.autoHotReload === 'boolean') config.autoHotReload = overrides.autoHotReload
+  }
+
+  /**
+   * 切换一个功能开关，立即生效并持久化。
+   * @param {string} name 开关名
+   * @param {unknown} value true/false
+   * @returns {{ ok: boolean, message?: string, features?: object }}
+   */
+  function setFeature(name, value) {
+    const key = String(name ?? '')
+    if (!Object.prototype.hasOwnProperty.call(FEATURE_LABELS, key)) {
+      return { ok: false, message: `未知功能开关：${key}` }
+    }
+    const enabled = value === true || value === 'true' || value === 1 || value === 'on'
+    state.settings = { ...(state.settings ?? {}) }
+    state.settings.features = { ...(state.settings.features ?? {}), [key]: enabled }
+    applyFeatureOverrides()
+    if (key === 'autoHotReload') {
+      if (enabled) startHotReloadWatch()
+      else stopHotReloadWatch()
+    }
+    saveState(true)
+    log('info', 'feature toggled', { name: key, enabled })
+    return { ok: true, features: featureValues() }
+  }
 
   // -- 日志 ----------------------------------------------------------------
 
@@ -1299,10 +1353,10 @@ function createChannel(ctx, config) {
         version: STATE_VERSION,
         accounts: parsed.accounts && typeof parsed.accounts === 'object' ? parsed.accounts : {},
         bindings: parsed.bindings && typeof parsed.bindings === 'object' ? parsed.bindings : {},
-        settings:
-          parsed.settings && typeof parsed.settings === 'object'
-            ? { defaultSessionId: String(parsed.settings.defaultSessionId ?? '') }
-            : { defaultSessionId: '' },
+        settings: {
+          ...(parsed.settings && typeof parsed.settings === 'object' ? parsed.settings : {}),
+          defaultSessionId: String(parsed.settings?.defaultSessionId ?? ''),
+        },
       }
       normalizeBindingRuntimeFlags()
       return
@@ -1894,31 +1948,6 @@ function createChannel(ctx, config) {
     }
   }
 
-  const VOICE_ASR_EXTS = new Set(['.wav', '.mp3', '.ogg', '.m4a', '.webm', '.flac'])
-
-  /**
-   * 语音兜底：腾讯转写为空时，尝试用 DSH 的 speechToText 服务转写本地音频。
-   * iLink 的语音一般是 silk，本地无法解码，会直接跳过。
-   * @param {string} filePath 已保存的语音文件
-   * @returns {Promise<string>} 转写文本，失败/不支持返回空串
-   */
-  async function transcribeVoiceFile(filePath) {
-    const ext = String(path.extname(filePath ?? '')).toLowerCase()
-    if (!VOICE_ASR_EXTS.has(ext)) return ''
-    const speech = ctx.get('speechToText')
-    if (!speech?.resolve || !speech?.transcribe) return ''
-    try {
-      const audio = new Uint8Array(fs.readFileSync(filePath))
-      if (audio.byteLength === 0) return ''
-      const spec = speech.resolve({ audio })
-      const transcript = await speech.transcribe(spec, new AbortController().signal)
-      return String(transcript?.text ?? '').trim()
-    } catch (err) {
-      log('warn', 'voice asr fallback failed', { file: filePath, error: String(err?.message ?? err) })
-      return ''
-    }
-  }
-
   async function describeInbound(accountId, chatId, msg) {
     const items = Array.isArray(msg?.item_list) ? msg.item_list : []
     const parts = []
@@ -1953,13 +1982,10 @@ function createChannel(ctx, config) {
         if (type === 2) {
           parts.push(`${prefix}[图片] 已解密保存到 ${saved.file}（${size}）。看图就用 read_image 打开这个路径。`.trim())
         } else if (type === 3) {
-          const tencentAsr = String(item?.voice_item?.text ?? '').trim()
-          let transcript = tencentAsr
-          if (!transcript && config.voiceAsr) transcript = await transcribeVoiceFile(saved.file)
+          const asr = String(item?.voice_item?.text ?? '').trim()
           parts.push(
-            `${prefix}[语音${seconds ? ` ${seconds}` : ''}] ${
-              transcript ? `转写：${transcript}` : '（未识别出文字）'
-            }；原始文件已保存到 ${saved.file}（${size}${transcript ? '' : '，silk 编码，需要转码才能播放'}）`,
+            `${prefix}[语音${seconds ? ` ${seconds}` : ''}] ${asr ? `转写：${asr}` : '（无转写）'}；` +
+              `原始文件已保存到 ${saved.file}（${size}，silk 编码，需要转码才能播放）`.trim(),
           )
         } else if (type === 4) {
           parts.push(
@@ -3961,30 +3987,6 @@ function createChannel(ctx, config) {
       }, 300)
       return true
     }
-    if (name === 'voice') {
-      const speech = ctx.get('speechToText')
-      let providers = []
-      try {
-        providers = speech?.listProviders?.() ?? []
-      } catch {
-        providers = []
-      }
-      await replyText(
-        binding,
-        [
-          '🎙️ 语音输入',
-          '腾讯转写：语音消息自带，优先使用',
-          `DSH 本地 ASR：${
-            providers.length > 0
-              ? providers.map((provider) => String(provider?.name ?? provider?.id ?? 'provider')).join('、')
-              : '没有可用 provider（未安装语音输入插件）'
-          }`,
-          `未识别时的提示：${config.voiceFallbackHint ? '开' : '关'}`,
-          'iLink 语音是 silk，本地 ASR 只处理 wav/mp3/ogg/m4a；转写为空会提示对方打字重发',
-        ].join('\n'),
-      )
-      return true
-    }
     if (name === 'stop') {
       const controller = ctx.get('sessionController')
       if (!controller?.cancel) {
@@ -4667,14 +4669,6 @@ function createChannel(ctx, config) {
     const binding = ensureBinding(accountId, chatId, fromUserId, String(msg?.context_token ?? ''))
     await flushPendingOnInbound(binding)
 
-    // 语音兜底：没有转写文字时，先给对方一句可操作的提示（不影响后续消息路由）
-    const voiceWithoutTranscript = (Array.isArray(msg?.item_list) ? msg.item_list : []).some(
-      (item) => Number(item?.type) === 3 && !String(item?.voice_item?.text ?? '').trim(),
-    )
-    if (voiceWithoutTranscript && config.voiceFallbackHint) {
-      void sendProgressMessage(binding, '🎙️ 这条语音没识别出文字，麻烦打字或重发一下（可能太短/方言）。')
-    }
-
     // 有选项/审批在等微信回复：这条消息当作答案消费掉，不再转发给会话
     const waiting = optionReplyWaiter(accountId, chatId)
     if (waiting) {
@@ -4946,6 +4940,7 @@ function createChannel(ctx, config) {
       mirror: { running: Boolean(mirrorTimer), intervalMs: config.mirrorIntervalMs },
       health: healthSummary(),
       settings: { defaultSessionId: state.settings?.defaultSessionId || '' },
+      features: featureValues(),
       emotions: emotionSummary(),
       options: { relay: config.relayOptions, waiting: optionWaits.size, replyTimeoutMs: config.optionReplyTimeoutMs },
       progress: {
@@ -5012,6 +5007,13 @@ function createChannel(ctx, config) {
           resolved: resolveQuoteRef('probe', chatId, item),
           quotes: Object.keys(quotes).length,
         })
+      }
+      if (method === 'GET' && route === 'features') {
+        return json(res, { features: featureValues(), labels: FEATURE_LABELS })
+      }
+      if (method === 'POST' && route === 'features') {
+        const body = await readJsonBody(req)
+        return json(res, setFeature(String(body?.name ?? ''), body?.value))
       }
       if (method === 'POST' && route === 'reload') {
         return json(res, await hotReloadPlugin('http'))
@@ -5170,6 +5172,7 @@ function createChannel(ctx, config) {
     }
     CHANNEL_REGISTRY.set(config.stateDir, channel)
     loadState()
+    applyFeatureOverrides()
     loadQuotes()
     ensureStickerDir()
     syncEmotions()
@@ -5228,6 +5231,8 @@ function createChannel(ctx, config) {
     hotReloadPlugin,
     startHotReloadWatch,
     stopHotReloadWatch,
+    featureValues,
+    setFeature,
     progressTick,
     flushPending,
     running: () => Boolean(progressTimer || mirrorTimer || healthTimer),
@@ -5243,7 +5248,6 @@ function createChannel(ctx, config) {
     maybeSendEmotions,
     emotionSummary,
     captureEmotionUpload,
-    transcribeVoiceFile,
     waitingOptions: () => optionWaits.size,
     handleHttp,
     sendToChat,

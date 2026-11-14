@@ -37,8 +37,7 @@ window.__ModuleLoader__.load({
       unsupported: '该微信号已绑定其它实例',
     }
 
-    const TONE = {
-      idle: '#8a8a8a',
+    const TONE = {      idle: '#8a8a8a',
       waiting: '#c08a00',
       scaned: '#c08a00',
       need_verifycode: '#c08a00',
@@ -47,6 +46,16 @@ window.__ModuleLoader__.load({
       error: '#d64545',
       unsupported: '#d64545',
     }
+
+    const FEATURE_ROWS = [
+      ['thinkingSummary', '思考片段摘要', '思考时给微信发「💭 思考中」短句'],
+      ['streamSegment', '流式分段', '边生成边按完整段落发，不等整条'],
+      ['emotionAuto', '自动表情', '按语境自动发 1–2 张表情包'],
+      ['automationReport', '定时任务完成通知', '定时任务跑完发「⏰ 完成」'],
+      ['progressHeartbeat', '进度心跳', '长任务每隔一段时间报「还在处理」'],
+      ['riskAlert', '风险消息邮件', '命中风险规则时给宿主发邮件'],
+      ['autoHotReload', '自动热重载', '文件变化后自动应用（每 30 秒检查）'],
+    ]
 
     const styles = {
       root: { height: '100%', overflowY: 'auto', padding: '28px 32px 48px', color: 'inherit', fontSize: 13, lineHeight: 1.6 },
@@ -256,6 +265,7 @@ window.__ModuleLoader__.load({
       const login = (state && state.login) || {}
       const accounts = (state && state.accounts) || []
       const bindings = (state && state.bindings) || []
+      const features = (state && state.features) || {}
       const defaultSession = (state && state.settings && state.settings.defaultSessionId) || ''
       const showQr = ['waiting', 'scaned', 'need_verifycode', 'expired'].includes(login.status)
 
@@ -660,6 +670,35 @@ window.__ModuleLoader__.load({
                   }),
                 ),
               ),
+        ),
+
+        h(
+          'div',
+          { style: styles.card },
+          h('h2', { style: styles.cardTitle }, '功能开关'),
+          h(
+            'div',
+            { style: { ...styles.muted, marginBottom: 10 } },
+            '这些是可选的打扰型功能：勾选立即生效并保存，重启后保持；命令类（/ping、/resend、/suggest、/tasks、/risk、/reload）不受影响。',
+          ),
+          h(
+            'div',
+            { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '8px 18px' } },
+            FEATURE_ROWS.map(([key, label, desc]) =>
+              h(
+                'label',
+                { key, style: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, cursor: 'pointer' } },
+                h('input', {
+                  type: 'checkbox',
+                  checked: Boolean(features[key]),
+                  disabled: busy === `feature-${key}`,
+                  onChange: () => void act(`feature-${key}`, '/features', { name: key, value: !features[key] }),
+                }),
+                h('span', null, label),
+                h('span', { style: { ...styles.muted, fontSize: 11 } }, desc),
+              ),
+            ),
+          ),
         ),
       )
     }

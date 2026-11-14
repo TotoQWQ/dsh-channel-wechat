@@ -30,15 +30,15 @@
 - **微信里整理会话**：`/rename 标题` 给会话改名；`/history 6` 回看最近几条对话；`/search 关键词` 跨会话搜历史，搜到的序号可直接 `/use` 切过去；`/approval ask|never` 看/切当前会话的审批策略。
 - **卖萌**：`/sticker` 从 `~/.dsh/wechat-stickers/` 随机发一张表情包（`/sticker 关键词` 按文件名筛、`/sticker 列表` 看全部）；`cuteLevel` 控制助手回复句尾是否自动带一个 emoji/颜文字（默认 `subtle`，约一半回复带）。
 - **表情包库 `/emotion`**：独立目录 `~/.dsh/wechat-emotions/`，按 9 个分类（开心/难过/生气/惊讶/爱你/无语/摸鱼/加油/其他）存放图片与 GIF，带索引和重命名；`/emotion add [分类]` 开始收录、接着发图、`/emotion end` 结束；`/emotion list / send / rename / delete` 管理；`/emotion other source true|false` 控制是否允许外来来源（默认 false，只用用户自己收录的）。发送前按语境做**本地关键词打分**（用户命中 2 分、助手回复命中 1 分），够分才发、每次最多 2 张、带冷却——全程不耗 token。
-- **思考片段摘要**：模型边想边把推理增量压成一句「💭 思考中：…」发到微信（本地截取、去代码块、按句号/上限截断，**不调模型不耗 token**）；同一会话默认 30 秒最多一条，`turn/end` 清空缓冲，`thinkingSummary: false` 可关。
+- **思考片段摘要**（默认关，面板可开）：模型边想边把推理增量压成一句「💭 思考中：…」发到微信（本地截取、去代码块、按句号/上限截断，**不调模型不耗 token**）；同一会话默认 30 秒最多一条，`turn/end` 清空缓冲。
 - **断联检测**：`/ping`（或 `/health`）在微信里直接查连接：每个账号是否在轮询、最近一次成功轮询多久前、最近错误、镜像与绑定数；snapshot 增加 `health` 供面板显示「连接正常/异常」。后台每 30 秒检查一次，长轮询超过 `healthStaleMs`（默认 120 秒）没成功就自动重启该账号的 monitor（记录 `staleRestarts`），不用手动重扫码；`healthCheck: false` 可关自动重启。
 - **分段发送**（微信不支持流式，只能整段分条发）：长回复按空行段落切分、能合并的段合并、超长段再按句号/长度切，默认每条不超过 `segmentMaxChars`（0 = 用 `maxReplyChars`），相邻条之间隔 `segmentDelayMs`（默认 500ms）；可选 `segmentIndex: true` 加「（1/3）」序号；`segmentMode: length` 可回到旧的纯长度切分。
-- **流式分段**：微信这一轮进行中时，按正文增量**边生成边发**——只在遇到空行（段落结束）且该段 ≥ `streamMinChars`（默认 200 字）时发送，两次至少间隔 `streamMinIntervalMs`（默认 1.5s）；最终回复会自动扣掉已发前缀，只补发剩余部分，不会重复；`streamSegment: false` 可关。
+- **流式分段**（默认关，面板可开）：微信这一轮进行中时，按正文增量**边生成边发**——只在遇到空行（段落结束）且该段 ≥ `streamMinChars`（默认 200 字）时发送，两次至少间隔 `streamMinIntervalMs`（默认 1.5s）；最终回复会自动扣掉已发前缀，只补发剩余部分，不会重复。
 - **建议入口**：微信里 `/suggest <内容>` 直接把需求提交成 GitHub issue（标题取首行、正文带聊天/账号/版本信息），成功后回复 issue 链接；同一聊天有冷却（`suggestCooldownMs`），token 支持插件配置 `suggestToken` 或环境变量 `GH_TOKEN` / `GITHUB_TOKEN`，可配 `suggestRepo` / `suggestLabels`。
 - **风险消息邮件预警**（可选，默认关）：`riskAlert: true` 后，入站文本命中规则（内置赌博 / 诈骗刷单 / 色情 / 引流外链，可用 `riskPatterns` 覆盖）时，用 SMTP 给宿主发一封邮件（含时间、账号、聊天、命中的规则与原文片段），**消息照常转发、不拦截不改写**；同一聊天有 `riskCooldownMs` 冷却（默认 5 分钟）。`/risk` 查看状态，`/risk test` 发测试邮件。
 - **自动化任务反馈**：定时任务（`schedule` 服务）投递到已绑定微信的会话后，这一轮结束时会往微信发一条 `⏰ 定时任务完成：「标题」· 用时 X`；通过任务的 `lastDelivery` 与 `turn/start` 时间窗口判断（默认前后 2 分钟），`automationReport: false` 可关。`/tasks`（`/schedule`）可直接查看当前定时任务列表。
 - **热重载**：改完插件文件不用重启 DSH——微信里发 `/reload`（或 `POST /wechat-channel/reload`）会调用 DSH HMR 的 `reconcileProfile()`，重新读取 profile 里变化的插件文件并重启对应 entry；`hotReload: false` 可禁用。可选 `autoHotReload: true` 后每 30 秒检查 `index.js` 修改时间，变化后自动热重载（默认关，避免编辑到一半就重载）。客户端面板（`client.js`）属于浏览器 bundle，热重载后仍需刷新页面。
-- **语音兜底**：优先用 iLink 自带的腾讯转写；转写为空时，若保存的是非 silk 音频（wav/mp3/ogg/m4a 等），尝试 DSH `speechToText` 服务再转一次；仍然没有文字就回对方一句「🎙️ 这条语音没识别出文字，麻烦打字或重发」，同时把语音标记（时长/文件路径）带给模型，避免静默丢消息。`voiceAsr: false` 关闭本地 ASR，`voiceFallbackHint: false` 关闭提示；`/voice` 可查看当前能力。
+- **功能开关（面板）**：Web GUI「微信」面板底部有「功能开关」卡片，可勾选/取消**思考片段摘要、流式分段、自动表情、定时任务完成通知、进度心跳、风险消息邮件、自动热重载**；改动立即生效并写入 `state.json`（`settings.features`），重启后保持。命令类功能（`/ping`、`/resend`、`/suggest`、`/tasks`、`/risk`、`/reload`、`/emotion`）始终可用。
 - **投递恢复**：发送失败（如 iLink `ret=-2 prepare failed`）的回复自动进补发队列（保留 `pendingTtlMs`，默认 6 小时），任一新消息带回 `context_token` 后**先自动补发**再处理新消息；`/resend` 可手动补发；连续 `sendBreakerThreshold` 次失败后熔断 `sendBreakerMs`（默认 5 分钟）不再撞接口；进度心跳失败会退避 2 分钟、不再刷屏；同一进程同一 stateDir 只保留一个活跃实例（防热重载泄漏出多个轮询/定时器）。
 - **消息插进正在跑的对话**：会话正在跑时（不管是谁发起的），微信里新来的消息用 `steer` 直接插进**当前这一轮**，在下一个 step 边界被模型看到，不用等这一轮结束；会话空闲时才按普通一轮一答处理。插入会给一次「📥 已插入当前对话」回执（10 秒内多次插入只回一次）。
   - 「在跑」的判断：优先 `sessionController.state` 的真实 `running`，其次 `turn/start`・`turn/end` 跟踪；`turnActive` 只是运行时兜底标记，不写入 `state.json`，重启后按会话真实状态重新判断（避免上次没跑完的轮次被当成一直在跑）。
@@ -116,7 +116,6 @@ plugin_manager: install_bundle  target=<本目录的绝对路径>
 | `/risk`（`/risk test`） | 查看风险邮件预警状态 / 发测试邮件 |
 | `/tasks`（`/schedule`） | 查看定时任务列表（完成后自动通知绑定微信） |
 | `/reload` | 热重载插件（应用新文件，不用重启 DSH） |
-| `/voice` | 查看语音转写与兜底状态 |
 | `/models` | 列出可用模型（按厂商分组编号，标出「当前 / 默认」和推理档），并记住这次的序号 |
 | `/model` | 查看当前会话模型与默认模型 |
 | `/model 2` | 切到上次 `/models` 列表的第 2 个模型；`/model 2 high` 同时指定推理档；也可 `/model <provider>/<modelId>` |
@@ -161,7 +160,7 @@ plugin_manager: install_bundle  target=<本目录的绝对路径>
 | `emotionThreshold` | `2` | `subtle` 档的语境分数门槛（用户命中 2 分、助手命中 1 分） |
 | `emotionCooldownMs` | `300000` | 同一聊天自动发表情的冷却 |
 | `emotionAllowOtherSource` | `false` | 是否允许外来来源表情包（内置等）；`/emotion other source true` 可临时开 |
-| `thinkingSummary` | `true` | 思考时把推理增量压成短摘要发微信（本地截取，不耗 token） |
+| `thinkingSummary` | `false` | 思考时把推理增量压成短摘要发微信（面板可开） |
 | `thinkingSummaryIntervalMs` | `30000` | 同一会话两条摘要的最小间隔，最短 10000 |
 | `thinkingSummaryChars` | `120` | 单条摘要最多多少字 |
 | `healthStaleMs` | `120000` | 长轮询多久没成功算断联（最短 30000） |
@@ -173,7 +172,7 @@ plugin_manager: install_bundle  target=<本目录的绝对路径>
 | `pendingTtlMs` | `21600000` | 补发队列保留时长（毫秒），过期才丢 |
 | `sendBreakerThreshold` | `5` | 连续发送失败多少次后熔断暂缓 |
 | `sendBreakerMs` | `300000` | 熔断后暂缓时长（毫秒） |
-| `streamSegment` | `true` | 边生成边发完整段落（微信没有流式） |
+| `streamSegment` | `false` | 边生成边发完整段落（面板可开） |
 | `streamMinChars` | `200` | 一个完整段落至少多少字才发 |
 | `streamMinIntervalMs` | `1500` | 两次流式发送的最小间隔（毫秒） |
 | `suggestRepo` | `TotoQWQ/dsh-channel-wechat` | `/suggest` 提交 issue 的仓库（owner/repo） |
@@ -192,8 +191,6 @@ plugin_manager: install_bundle  target=<本目录的绝对路径>
 | `automationWindowMs` | `120000` | 判断「这一轮由定时任务触发」的时间窗口 |
 | `hotReload` | `true` | 允许 `/reload` 触发热重载 |
 | `autoHotReload` | `false` | 文件变化后自动热重载（每 30 秒检查） |
-| `voiceAsr` | `true` | 腾讯转写为空时尝试 DSH speechToText（仅非 silk） |
-| `voiceFallbackHint` | `true` | 语音没转写时提示对方打字重发 |
 | `apiBase` | `https://ilinkai.weixin.qq.com` | iLink 服务地址 |
 
 选项/审批的回复规则：

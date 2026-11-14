@@ -6,6 +6,30 @@
 
 ---
 
+## 2.17.0 — 2026-11-14
+
+### 变更（默认值收敛为“可选”）
+
+- **思考片段摘要** `thinkingSummary` 默认改为 **关**；
+- **流式分段** `streamSegment` 默认改为 **关**（回到整条回复完成后按段发送）；
+- **移除语音兜底**：微信语音本身带腾讯转写，2.16.0 的本地 ASR / 打字提示整体删除（`/voice` 命令、`voiceAsr`、`voiceFallbackHint`、测试一并移除）；语音消息仍按原样把腾讯转写和 silk 路径交给会话。
+
+### 新增
+
+- **面板「功能开关」**：Web GUI「微信」面板底部新增开关卡片，可即时切换
+  思考片段摘要 / 流式分段 / 自动表情 / 定时任务完成通知 / 进度心跳 / 风险消息邮件 / 自动热重载；
+  - 改动立即生效并写入 `state.json` 的 `settings.features`，重启后保持；
+  - 新增 `GET/POST /wechat-channel/features`（`{name, value}`）；
+  - 命令类功能不受影响。
+- 自测 `test-features.mjs`（6 项：默认值、即时生效、持久化、emotionAuto 映射、未知开关、配置显式开启）。
+- 修复：`loadState` 现在保留 `settings` 的全部字段（之前只保留 `defaultSessionId`，会丢掉 `emotionAllowOtherSource` / `features`）；清理了一处悬空注释。
+
+### 变更
+
+- 版本 2.16.0 → 2.17.0（`CHANNEL_VERSION` / `bot_agent` 同步）。
+
+---
+
 ## 2.16.0 — 2026-11-14
 
 ### 新增

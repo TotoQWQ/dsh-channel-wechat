@@ -33,7 +33,8 @@
         # handoff = 交还电脑端弹卡（没人守在电脑旁时会一直等）
         optionTimeoutMode: skip
         # 进度提示：一轮跑得久时，每隔一段时间在微信里报一次「已经思考多久」
-        progressHeartbeat: true
+        # 关掉：进度心跳在发送受限时会引发重试风暴，把正常回复挤掉（2026-11-14 排查）
+        progressHeartbeat: false
         progressIntervalMs: 120000
         # 会话正在跑时，微信消息直接插进当前对话（steer），不再排在这一轮后面等
         insertWhileBusy: true
@@ -54,7 +55,8 @@
         # 是否允许外来来源表情包（插件内置等）；默认 false，只发用户自己收录的
         emotionAllowOtherSource: false
         # 思考片段摘要：边想边给微信发一句本地截取的短摘要（不调模型、不耗 token）
-        thinkingSummary: true
+        # 同样关掉：每轮多次发送，容易触发微信侧限流
+        thinkingSummary: false
         # 同一会话两条摘要的最小间隔（毫秒）
         thinkingSummaryIntervalMs: 30000
         # 单条摘要最多多少字
@@ -77,8 +79,8 @@
         sendBreakerThreshold: 5
         # 熔断后暂缓时长（毫秒）
         sendBreakerMs: 300000
-        # 流式分段：模型边生成边把「完整段落」发到微信（不用等整条回复）
-        streamSegment: true
+        # 流式分段：模型边生成边把「完整段落」发到微信（默认关，可在面板打开）
+        streamSegment: false
         # 一个完整段落至少多少字才发（太短会刷屏）
         streamMinChars: 200
         # 两次流式发送的最小间隔（毫秒）
@@ -116,9 +118,6 @@
         hotReload: true
         # 文件变更后自动热重载（默认关，避免编辑到一半就重载）
         autoHotReload: false
-        # 语音兜底：腾讯转写为空时尝试 DSH speechToText（仅非 silk 音频），并提示对方打字
-        voiceAsr: true
-        voiceFallbackHint: true
         # 跨账号转发：同一会话下，A 号收到的消息也发到 B/C 号的微信
         relayAcrossAccounts: true
         relayPrefix: '[{account}] '
