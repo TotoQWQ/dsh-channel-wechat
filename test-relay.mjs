@@ -170,15 +170,38 @@ await check('未绑定会话返回 undefined', async () => {
   assert.equal(untouched, undefined)
 })
 
-// 5) 超时：不回复，超时后返回 undefined（交还电脑端）
-await check('微信超时 → 交还电脑端', async () => {
+// 5) 超时（默认 skip）：问题标记未作答、审批按拒绝，都继续这一轮
+await check('微信超时 → 选项卡按「跳过」继续', async () => {
+  const result = await channel.relayUserQuestion({
+    agent: { id: sessionId },
+    questions: [{ id: 'timeout-q', question: '还选吗？', options: [{ label: '甲' }, { label: '乙' }] }],
+    signal: new AbortController().signal,
+  })
+  assert.deepEqual(result, { answers: [{ id: 'timeout-q', selected: [] }] })
+  assert.equal(await waitFor(() => sent.some((text) => text.includes('已按「跳过」')), true), true)
+})
+
+await check('微信超时 → 审批按「拒绝」继续', async () => {
   const result = await channel.relayApproval({
     agent: { id: sessionId },
     toolName: 'pwsh',
     signal: new AbortController().signal,
   })
+  assert.equal(result, 'rejected')
+  assert.equal(await waitFor(() => sent.some((text) => text.includes('已按「拒绝」')), true), true)
+})
+
+// 6) optionTimeoutMode: handoff 时保留老行为：交还电脑端
+await check('handoff 模式超时 → 交还电脑端', async () => {
+  const handoff = createChannel(ctx, { ...config, optionTimeoutMode: 'handoff' })
+  const result = await handoff.relayApproval({
+    agent: { id: sessionId },
+    toolName: 'pwsh',
+    signal: new AbortController().signal,
+  })
   assert.equal(result, undefined)
-  assert.equal(await waitFor(() => sent.some((text) => text.includes('超时')), true), true)
+  assert.equal(await waitFor(() => sent.some((text) => text.includes('转到电脑端')), true), true)
+  handoff.stop()
 })
 
 channel.stop()

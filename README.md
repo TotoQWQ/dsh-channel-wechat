@@ -125,7 +125,8 @@ plugin_manager: install_bundle  target=<本目录的绝对路径>
 | `mirrorAssistantMessages` | `true` | 是否把助手回复镜像到微信 |
 | `mirrorIntervalMs` | `1200` | 镜像扫描间隔 |
 | `relayOptions` | `true` | 把 DSH 的选项卡 / 审批卡同步到微信并接受序号回复 |
-| `optionReplyTimeoutMs` | `110000` | 微信里等选项/审批回复的时长，超时交还电脑端弹卡 |
+| `optionReplyTimeoutMs` | `110000` | 微信里等选项/审批回复的时长 |
+| `optionTimeoutMode` | `skip` | 超时行为：`skip` 跳过继续（选项卡标未作答、审批按拒绝），`handoff` 交还电脑端弹卡 |
 | `progressHeartbeat` | `true` | 一轮跑得久时在微信里定期报进度（已思考多久） |
 | `progressIntervalMs` | `120000` | 进度提示间隔，最短 30000 |
 | `insertWhileBusy` | `true` | 会话在跑时把微信消息插进当前对话（steer）而不是排队等待 |
@@ -136,7 +137,7 @@ plugin_manager: install_bundle  target=<本目录的绝对路径>
 - 选项题：回 `1`、`2`… 选对应序号；多选回 `1,3`（中英文逗号、顿号都行）；回其他文字当作自定义答案。
 - 审批：回 `1` 允许一次，回 `2` 拒绝；也可回「允许/同意/拒绝/OK/No」。
 - 序号超出范围、单选题回了多个序号时会提示重回，不会把错误答案交给模型。
-- 微信里超时未回：先把提示发给微信，再 `next()` 交还 Web 客户端，电脑端照常弹卡。
+- 微信里超时未回（默认 110 秒）：默认**跳过继续**——选项卡按「未作答」交回（`selected: []`），审批按「拒绝」处理，这一轮照常往下走；要回到「交还电脑端弹卡」的老行为，把 `optionTimeoutMode` 设成 `handoff`。这样人不在电脑旁时，会话不会被一张等不到的卡卡住。
 
 状态与凭据写在 `~/.dsh/wechat-bridge/state.json`（0600），日志在同目录 `bridge.log`。
 

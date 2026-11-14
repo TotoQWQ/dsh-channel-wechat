@@ -27,8 +27,11 @@
         # 选项 / 审批也发到微信：DSH 里的 ask_user_question 选项与审批卡会同步到微信，
         # 直接回序号（或文字）即可作答，不用回电脑点
         relayOptions: true
-        # 微信里等选项/审批回复的时长（毫秒）；超时就把这次请求交还电脑端弹卡
+        # 微信里等选项/审批回复的时长（毫秒）
         optionReplyTimeoutMs: 110000
+        # 超时怎么办：skip = 直接跳过继续（选项卡标未作答、审批按拒绝）；
+        # handoff = 交还电脑端弹卡（没人守在电脑旁时会一直等）
+        optionTimeoutMode: skip
         # 进度提示：一轮跑得久时，每隔一段时间在微信里报一次「已经思考多久」
         progressHeartbeat: true
         progressIntervalMs: 120000

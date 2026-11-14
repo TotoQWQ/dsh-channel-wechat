@@ -32,8 +32,8 @@ const ILINK_APP_ID = 'bot'
 /** 0x000MMNNPP：与官方 2.4.10 对齐 */
 const ILINK_APP_CLIENT_VERSION = (2 << 16) | (4 << 8) | 10
 /** 插件版本：与 package.json 保持一致，出现在 base_info.channel_version 里 */
-const CHANNEL_VERSION = '2.4.8'
-const BOT_AGENT = 'DSH-WeChat/2.4.8'
+const CHANNEL_VERSION = '2.4.9'
+const BOT_AGENT = 'DSH-WeChat/2.4.9'
 /** 媒体 CDN（官方 getUploadUrl 没返回 upload_full_url 时用它拼上传地址） */
 const CDN_BASE = 'https://novac2c.cdn.weixin.qq.com/c2c'
 
@@ -537,6 +537,9 @@ function normalizeConfig(raw) {
         : 120_000,
     // 微信消息插入正在跑的对话（steer），而不是排在当前这一轮后面等
     insertWhileBusy: c.insertWhileBusy !== false,
+    // 微信里等不到回复时：skip = 直接跳过（选项卡标未作答 / 审批按拒绝）继续这一轮；
+    // handoff = 交还电脑端弹卡（没人守在电脑旁时会一直等）
+    optionTimeoutMode: c.optionTimeoutMode === 'handoff' ? 'handoff' : 'skip',
     stateDir,
   }
 }
@@ -2025,8 +2028,19 @@ function createChannel(ctx, config) {
         })
         if (reply.status === 'aborted') return undefined
         if (reply.status === 'timeout') {
-          void sendOptionPrompt(targets, '⏱ 微信等待超时，这道题已转到电脑端。')
-          return undefined
+          if (config.optionTimeoutMode === 'handoff') {
+            void sendOptionPrompt(targets, '⏱ 微信等待超时，这道题已转到电脑端。')
+            return undefined
+          }
+          for (let rest = index; rest < questions.length; rest += 1) {
+            answers.push({ id: String(questions[rest].id), selected: [] })
+          }
+          await sendOptionPrompt(
+            targets,
+            `⏱ 微信 ${timeoutSec} 秒没收到回复，已按「跳过」继续（这题标记为未作答）。`,
+          )
+          log('info', 'question timeout skipped', { sessionId, from: index, total: questions.length })
+          return { answers }
         }
         const parsed = parseQuestionReply(reply.text, question)
         if (parsed.error) {
@@ -2066,8 +2080,13 @@ function createChannel(ctx, config) {
       })
       if (reply.status === 'aborted') return 'cancelled'
       if (reply.status === 'timeout') {
-        void sendOptionPrompt(targets, '⏱ 微信等待超时，审批已转到电脑端。')
-        return undefined
+        if (config.optionTimeoutMode === 'handoff') {
+          void sendOptionPrompt(targets, '⏱ 微信等待超时，审批已转到电脑端。')
+          return undefined
+        }
+        await sendOptionPrompt(targets, `⏱ 微信 ${timeoutSec} 秒没收到回复，已按「拒绝」继续这一轮。`)
+        log('info', 'approval timeout rejected', { sessionId, toolName: request.toolName })
+        return 'rejected'
       }
       const parsed = parseApprovalReply(reply.text)
       if (parsed.error) {
